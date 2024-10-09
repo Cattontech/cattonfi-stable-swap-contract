@@ -1,0 +1,158 @@
+#pragma version >=0.4.4;
+#include "../export/buffer.fc";
+#include "../export/liquidity.fc";
+
+;; -----------------------------------------------------------------------
+;; Jetton token
+;; -----------------------------------------------------------------------
+;; forward send_token
+;; -----------------------------------------------------------------------
+const int fwd::send_token::cells = 0
+  + 1; ;;ref_body
+const int fwd::send_token::bits = 0
+  + 32 ;;op (body)
+  + 64 ;;query_id (body)
+  + 124 ;;amount (body) (max)
+  + 267 ;;destination (body)
+  + 267 ;;response_destination (body)
+  + 1 ;;custom_payload (body) (null)
+  + 4 ;;forward_ton_amount (body) (0)
+  + 1 + 32; ;;forward_payload (body) (forward_payload as Cell with reason_code)
+
+;; -----------------------------------------------------------------------
+;; Liquidity
+;; -----------------------------------------------------------------------
+;; forward mint_liquidity
+;; -----------------------------------------------------------------------
+const int fwd::mint_liquidity::cells = 0
+  + 1 ;;ref_init_data
+  + liquidity_code::cells ;;ref_init_code
+  + 1; ;;ref_body
+const int fwd::mint_liquidity::bits = 0
+  + 267 ;;pool (state_init_data)
+  + 267 ;;owner (state_init_data)
+  + 4 ;;balance (state_init_data)
+  + liquidity_code::bits ;;(state_init_code)
+
+  + 32 ;;op (body)
+  + 64 ;;query_id (body)
+  + 124 ;;amount (body) (max)
+  + 267 ;;from (body)
+  + 267 ;;response_address (body)
+  + 4 ;;forward_ton_amount (body) (0)
+  + 1; ;;forward_payload (body) (null)
+
+;; -----------------------------------------------------------------------
+;; Buffer
+;; -----------------------------------------------------------------------
+;; forward buffer_token
+;; -----------------------------------------------------------------------
+const int fwd::buffer_token::cells = 0
+  + 1 ;;ref_init_data
+  + buffer_code::cells ;;ref_init_code
+  + 1 ;;ref_body
+  + 1; ;;ref_c_amounts
+const int fwd::buffer_token::bits = 0
+  + 267 ;;pool (state_init_data)
+  + 267 ;;owner (state_init_data)
+  + 1 ;;balances (state_init_data)
+  + buffer_code::bits ;;(state_init_code)
+
+  + 32 ;;op (body)
+  + 64 ;;query_id (body)
+  + 124 ;;min_lp (body) (max)
+  + 1 + 1023; ;;c_amounts (body) (max)
+
+;; -----------------------------------------------------------------------
+;; Pool
+;; -----------------------------------------------------------------------
+;; forward pool_add_liquidity
+;; -----------------------------------------------------------------------
+const int fwd::buffer_add_liquidity_notification::cells = 0
+  + 1 ;;ref_body
+  + 1; ;;ref_c_amounts
+const int fwd::buffer_add_liquidity_notification::bits = 0
+  + 32 ;;op (body)
+  + 64 ;;query_id (body)
+  + 267 ;;owner (body)
+  + 124 ;;min_lp (body) (max)
+  + 1 + 1023; ;;c_amounts (body) (max)
+
+;; -----------------------------------------------------------------------
+;; forward pool_refund_me
+;; -----------------------------------------------------------------------
+const int fwd::buffer_refund_me_notification::cells = 0
+  + 1 ;;ref_body
+  + 1; ;;ref_c_amounts
+const int fwd::buffer_refund_me_notification::bits = 0
+  + 32 ;;op (body)
+  + 64 ;;query_id (body)
+  + 267 ;;owner (body)
+  + 1 + 1023; ;;c_amounts (body) (max)
+
+;; -----------------------------------------------------------------------
+;; forward pool_remove_liquidity
+;; -----------------------------------------------------------------------
+const int fwd::pool_remove_liquidity::cells = 0
+  + 1 ;;ref_body
+  + 1 ;;ref_custom_payload
+  + 1; ;;ref_c_min_amounts
+const int fwd::pool_remove_liquidity::bits = 0
+  + 32 ;;op (body)
+  + 64 ;;query_id (body)
+  + 124 ;;amount (body) (max)
+  + 267 ;;sender (body)
+  + 267 ;;response_destination (body)
+
+  + 1 ;;maybe custom_payload (body)
+  + 32 ;;op (pool_remove_liquidity) (body)
+  + 267 ;;recipient (body)
+  + 1 + 1023; ;;c_min_amounts (body) (max)
+
+;; -----------------------------------------------------------------------
+;; forward pool_remove_liquidity_imbalance
+;; -----------------------------------------------------------------------
+const int fwd::pool_remove_liquidity_imbalance::cells = 0
+  + 1 ;;ref_body
+  + 1 ;;ref_custom_payload
+  + 1; ;;ref_c_amounts
+const int fwd::pool_remove_liquidity_imbalance::bits = 0
+  + 32 ;;op (body)
+  + 64 ;;query_id (body)
+  + 124 ;;amount (body) (max)
+  + 267 ;;sender (body)
+  + 267 ;;response_destination (body)
+
+  + 1 ;;maybe custom_payload (body)
+  + 32 ;;op (pool_remove_liquidity_imbalance) (body)
+  + 267 ;;recipient (body)
+  + 1 + 1023; ;;c_amounts (body) (max)
+
+;; -----------------------------------------------------------------------
+;; forward pool_remove_liquidity_one_coin
+;; -----------------------------------------------------------------------
+const int fwd::pool_remove_liquidity_one_coin::cells = 0
+  + 1 ;;ref_body
+  + 1; ;;ref_custom_payload
+const int fwd::pool_remove_liquidity_one_coin::bits = 0
+  + 32 ;;op (body)
+  + 64 ;;query_id (body)
+  + 124 ;;amount (body) (max)
+  + 267 ;;sender (body)
+  + 267 ;;response_destination (body)
+
+  + 1 ;;maybe custom_payload (body)
+  + 32 ;;op (pool_remove_liquidity_one_coin) (body)
+  + 267 ;;recipient (body)
+  + 4 ;;idx_token_out (body) (max)
+  + 124; ;;min_amount (body) (max)
+
+;; -----------------------------------------------------------------------
+;; forward pool_claim_fee
+;; -----------------------------------------------------------------------
+const int fwd::pool_claim_fee::cells = 0
+  + 1; ;;ref_body
+const int fwd::pool_claim_fee::bits = 0
+  + 32 ;;op (body)
+  + 64 ;;query_id (body)
+  + 267; ;;admin (body)

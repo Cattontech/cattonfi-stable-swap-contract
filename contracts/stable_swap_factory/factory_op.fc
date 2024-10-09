@@ -1,0 +1,18 @@
+#pragma version >=0.4.4;
+
+;; -----------------------------------------------------------------------
+;; OpCode
+;; -----------------------------------------------------------------------
+const int op::factory_create_plain_pool = "factory_create_plain_pool"c;
+const int op::factory_tranfer_admin = "factory_tranfer_admin"c;
+const int op::factory_new_fee_recipient = "factory_new_fee_recipient"c;
+const int op::factory_new_plain_pool = "factory_new_plain_pool"c;
+const int op::factory_new_meta_pool = "factory_new_meta_pool"c;
+
+
+;; -----------------------------------------------------------------------
+;; ErrorCode
+;; -----------------------------------------------------------------------
+const int err::decimals_len = 160;
+const int err::decimal_exceeded_maximum = 161;
+const int err::no_coin = 162;

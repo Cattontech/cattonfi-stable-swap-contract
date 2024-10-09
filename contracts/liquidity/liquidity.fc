@@ -1,0 +1,218 @@
+#pragma version >=0.4.4;
+#include "../lib/stdlib.fc";
+#include "../lib/common.fc";
+#include "../lib/utils.fc";
+#include "../gas/fee_liquidity.fc";
+#include "liquidity_utils.fc";
+
+global slice lp::pool;
+global slice lp::owner;
+global int lp::balance;
+
+() lp::load_data() impure {
+  slice ds = get_data().begin_parse();
+  lp::pool = ds~load_msg_addr();
+  lp::owner = ds~load_msg_addr();
+  lp::balance = ds~load_coins();
+}
+
+() lp::save_data() impure inline_ref {
+  set_data(begin_cell()
+    .store_slice(lp::pool)
+    .store_slice(lp::owner)
+    .store_coins(lp::balance)
+    .end_cell()
+  );
+}
+
+{-
+  transfer query_id:uint64 amount:(VarUInteger 16)
+    destination:MsgAddress response_destination:MsgAddress
+    custom_payload:(Maybe ^Cell) forward_ton_amount:(VarUInteger 16)
+    forward_payload:(Either Cell ^Cell) = InternalMsgBody;
+-}
+() send_tokens(slice sender, slice body, int fwd_fee) impure inline {
+  int query_id = body~load_uint(64);
+  int amount = body~load_coins();
+  slice recipient = body~load_msg_addr();
+  slice return_excess = body~load_msg_addr();
+  body~load_maybe_ref(); ;; skip custom_payload
+  int forward_ton_amount = body~load_coins();
+  slice forward_payload = body;
+  body~skip_dict(); ;; check either field
+  body~impure_touch();
+
+  if return_excess.addr_none?() {
+    return_excess = sender;
+  }
+
+  when::chain(chain::base, recipient);
+  var (recipient_wallet, state_init, _) = calc_liquidity_wallet_address(lp::pool, recipient, my_code());
+  int msg_val = get_incoming_value().pair_first();
+  int fee = fee::send_liquidity() + forward_ton_amount + (forward_ton_amount ? 2 : 1) * fwd_fee;
+
+  throw_unless(err::access_denied, equal_slices(sender, lp::owner));
+  throw_unless(err::insufficient_fee, msg_val >= fee);
+  throw_unless(err::insufficient_funds, amount <= lp::balance);
+  throw_if(err::receiver_is_sender, equal_slices(recipient, lp::owner));
+
+  lp::balance -= amount;
+
+  builder internal_transfer = begin_cell()
+      .store_uint(op::internal_transfer, 32)
+      .store_uint(query_id, 64)
+      .store_coins(amount)
+      .store_slice(lp::owner) ;; from
+      .store_slice(return_excess) ;; response_address
+      .store_coins(forward_ton_amount)
+      .store_slice(forward_payload);
+  send_msg(true, recipient_wallet, state_init, internal_transfer, 0, msg::remaining_value);
+}
+
+{-
+  internal_transfer query_id:uint64 amount:(VarUInteger 16) from:MsgAddress
+    response_address:MsgAddress forward_ton_amount:(VarUInteger 16)
+    forward_payload:(Either Cell ^Cell) = InternalMsgBody;
+-}
+() receive_tokens(slice src, slice body) impure inline {
+  int query_id = body~load_uint(64);
+  int amount = body~load_coins();
+  slice sender = body~load_msg_addr();
+  slice return_excess = body~load_msg_addr();
+  int forward_ton_amount = body~load_coins();
+  slice forward_payload = body;
+
+  when::chain(chain::base, src);
+  var (sender_wallet, _, _) = calc_liquidity_wallet_address(lp::pool, sender, my_code());
+
+  throw_unless(err::access_denied,
+    equal_slices(src, sender_wallet.to_slice()) | ;; user tranfer liquidity
+    equal_slices(src, lp::pool)); ;; mint liquidity from pool
+
+  lp::balance += amount;
+
+  if forward_ton_amount {
+    ;; transfer_notification query_id:uint64 amount:(VarUInteger 16)
+    ;;   sender:MsgAddress forward_payload:(Either Cell ^Cell) = InternalMsgBody;
+    builder notification = begin_cell()
+      .store_uint(op::transfer_notification, 32)
+      .store_uint(query_id, 64)
+      .store_coins(amount)
+      .store_slice(sender)
+      .store_slice(forward_payload);
+    send_msg(false, lp::owner.to_builder(), null(), notification, forward_ton_amount,
+      msg::pay_gas_separately + msg::bounce_if_failed
+    );
+  }
+
+  raw_reserve(fee::store_liquidity(), reserve::at_most);
+
+  builder excess = begin_cell()
+    .store_uint(op::excesses, 32)
+    .store_uint(query_id, 64);
+  send_msg(false, return_excess.to_builder(), null(), excess, 0, msg::unreserved_balance + msg::ignore_errors);
+}
+
+{-
+  burn query_id:uint64 amount:(VarUInteger 16) response_destination:MsgAddress
+    custom_payload:(Maybe ^Cell) = InternalMsgBody;
+-}
+() burn_tokens(slice sender, slice body, int fwd_fee) impure inline {
+  int query_id = body~load_uint(64);
+  int amount = body~load_coins();
+  slice return_excess = body~load_msg_addr();
+  cell custom_payload = body~load_maybe_ref();
+
+  throw_unless(err::access_denied, equal_slices(lp::owner, sender));
+  throw_unless(err::insufficient_funds, lp::balance >= amount);
+  throw_if(err::zero_amount, amount == 0);
+
+  int msg_val = get_incoming_value().pair_first();
+  int fee = fee::burn_liquidity() + fwd_fee;
+  ;; ensure enough TON to execute burn_tokens & revert_burn_tokens
+  throw_unless(err::insufficient_fee, msg_val >= fee);
+
+  lp::balance -= amount;
+
+  ;; burn_notification query_id:uint64 amount:(VarUInteger 16) sender:MsgAddress
+  ;;   response_destination:MsgAddress custom_payload:(Maybe ^Cell) = InternalMsgBody;
+  builder burn_notification = begin_cell()
+    .store_uint(op::burn_notification, 32)
+    .store_uint(query_id, 64)
+    .store_coins(amount)
+    .store_slice(lp::owner)
+    .store_slice(return_excess)
+    .store_maybe_ref(custom_payload); ;; custom_payload to withdraw token of pool
+  send_msg(true, lp::pool.to_builder(), null(), burn_notification, 0, msg::remaining_value);
+}
+
+;; The body of the bounced message will contain 32 bit 0xffffffff
+;; followed by 256 bit from original message
+;; https://docs.ton.org/develop/smart-contracts/guidelines/non-bouncable-messages
+() on_bounce(slice body) impure inline {
+  body~skip_bits(32);
+  int op = body~load_uint(32);
+  body~skip_bits(64); ;; skip query_id
+
+  if (op == op::internal_transfer) | (op == op::burn_notification) {
+    int amount = body~load_coins();
+    lp::balance += amount;
+  }
+
+  send_excesses(lp::owner, 0, msg::remaining_value + msg::ignore_errors);
+}
+
+() route_internal_message(int flags, slice sender, slice body, slice cs) impure inline {
+  if flags & 1 {
+    return on_bounce(body);
+  }
+
+  int op = body~load_uint(32);
+
+  ;; receive from `user`
+  if op == op::transfer {
+    cs~load_msg_addr(); ;; skip dst
+    cs~load_coins(); ;; skip value
+    cs~skip_bits(1); ;; skip extracurrency collection
+    cs~load_coins(); ;; skip ihr fee
+    ;; use fwd_fee to estimate forward_payload cost
+    int fwd_fee = get_original_fwd_fee(cs~load_coins(), false);
+    return send_tokens(sender, body, fwd_fee);
+  }
+  ;; receive from `pool`, `liquidity`
+  if op == op::internal_transfer {
+    return receive_tokens(sender, body);
+  }
+  ;; receive from `user`
+  if op == op::burn {
+    cs~load_msg_addr(); ;; skip dst
+    cs~load_coins(); ;; skip value
+    cs~skip_bits(1); ;; skip extracurrency collection
+    cs~load_coins(); ;; skip ihr fee
+    int fwd_fee = get_original_fwd_fee(cs~load_coins(), false);
+    return burn_tokens(sender, body, fwd_fee);
+  }
+
+  ;; top up TON balance
+  if op == op::top_up {
+    throw(0); ;; do nothing
+  }
+
+  throw(err::invalid_op);
+}
+
+() recv_internal(cell in_msg_full, slice in_msg_body) impure {
+  ;; ~strdump("liquidity:get_storage_fees"); ~dump(get_storage_fees());
+  slice cs = in_msg_full.begin_parse();
+  int flags = cs~load_uint(4);
+  slice sender = cs~load_msg_addr();
+
+  lp::load_data();
+  route_internal_message(flags, sender, in_msg_body, cs);
+  lp::save_data();
+}
+
+(int, slice, slice, cell) get_wallet_data() method_id {
+  lp::load_data();
+  return (lp::balance, lp::owner, lp::pool, my_code());
+}

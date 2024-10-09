@@ -1,0 +1,55 @@
+#pragma version >=0.4.4;
+#include "../lib/stdlib.fc";
+#include "../lib/common.fc";
+#include "../lib/utils.fc";
+
+cell init_plain_pool_data(
+  slice factory,
+  int n_coins,
+  int amp,
+  int fee,
+  int admin_fee,
+  cell coins,
+  cell precision_mul
+) inline {
+  return begin_cell()
+    .store_slice(factory) ;; admin 267 bit
+    .store_slice(factory) ;; fee_recipient 267 bit
+    .store_slice(none_address()) ;; future_admin 267 bit
+    .store_coins(0) ;; liquidity_supply 4 bit
+    .store_uint(n_coins, 4) ;; n_coins 4 bit
+    .store_ref(begin_cell()
+      .store_int(false, 1) ;; is_initialized? 1 bit
+      .store_int(false, 1) ;; is_killed? 1 bit
+      .store_uint(amp, 32) ;; initial_A 32 bit
+      .store_uint(amp, 32) ;; future_A 32 bit
+      .store_uint(0, 64) ;; initial_A_time 64 bit
+      .store_uint(0, 64) ;; future_A_time 64 bit
+      .store_uint(fee, 64) ;; fee 64 bit
+      .store_uint(admin_fee, 64) ;; admin_fee 64 bit
+
+      .store_uint(0, 64) ;; transfer_admin_deadline
+      .store_uint(0, 64) ;; admin_actions_deadline
+      .store_uint(0, 64) ;; future_fee
+      .store_uint(0, 64) ;; future_admin_fee
+
+      .store_dict(coins) ;; coins hashmap
+      .store_maybe_ref(null()) ;; wallets 1 bit
+      .store_ref(begin_cell()
+        .store_maybe_ref(null()) ;; balances 1 bit
+        .store_maybe_ref(null()) ;; admin_balances 1 bit
+        .store_maybe_ref(precision_mul) ;; precision_mul 1 + 1023 bit
+        .end_cell())
+      .end_cell())
+    .store_maybe_ref(null()) ;; jetton_content 1 bit
+    .store_maybe_ref(null()) ;; buffer_code 1 bit
+    .store_maybe_ref(null()) ;; liquidity_code 1 bit
+    .end_cell();
+}
+
+(builder, builder, int) calc_plain_pool_address(cell init_data, cell pool_code) inline {
+  builder state_init = create_state_init(pool_code, init_data);
+  int addr = state_init.end_cell().cell_hash();
+  builder pool_addr = create_address(chain::base, addr);
+  return (pool_addr, state_init, addr);
+}

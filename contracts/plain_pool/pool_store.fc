@@ -1,0 +1,188 @@
+#pragma version >=0.4.4;
+#include "../lib/stdlib.fc";
+#include "../lib/tuple.fc";
+
+;; Admin address to execute admin function.
+global slice pool::admin;
+;; The fee recipient address.
+global slice pool::fee_recipient;
+;; The next admin address to be applied.
+global slice pool::future_admin;
+;; Total liquidity supply.
+global int pool::liquidity_supply;
+;; Number of coins in a swap.
+global int pool::n_coins;
+
+;; Initialized state.
+global int pool::is_initialized?;
+;; Kill state.
+global int pool::is_killed?;
+;; Initial amplification coefficient (A).
+global int pool::initial_A;
+;; Target amplification coefficient (A).
+global int pool::future_A;
+;; Ramp A start timestamp.
+global int pool::initial_A_time;
+;; Ramp A stop timestamp.
+global int pool::future_A_time;
+;; Fee for: swap.
+global int pool::fee;
+;; Admin fee for: swap.
+global int pool::admin_fee;
+
+;; The deadline to apply new admin.
+global int pool::transfer_admin_deadline;
+;; The deadline to apply new fee.
+global int pool::admin_actions_deadline;
+;; New fee commited.
+global int pool::future_fee;
+;; New admin fee commited.
+global int pool::future_admin_fee;
+
+;; Mapping from index to JettonMaster.
+global cell pool::coins;
+;; wallets$_ wallet_idx:(HashmapE 256 uint4)
+;;   idx_wallet:(HashmapE 4 uint256) = Wallets;
+;; Mapping from PoolJettonWallet to index 
+;; and mapping from index to PoolJettonWallet.
+global cell pool::wallets;
+
+;; The reserve balance of tokens.
+global cell pool::balances;
+;; The admin fee balances.
+global cell pool::admin_balances;
+;; The decimal list is added to make amount have decimal 18.
+global cell pool::precision_mul;
+
+global cell pool::jetton_content;
+global cell pool::buffer_code;
+global cell pool::liquidity_code;
+
+() pool::load_data() impure {
+  slice ds = get_data().begin_parse();
+  pool::admin = ds~load_msg_addr();
+  pool::fee_recipient = ds~load_msg_addr();
+  pool::future_admin = ds~load_msg_addr();
+  pool::liquidity_supply = ds~load_coins();
+  pool::n_coins = ds~load_uint(4);
+
+  cell pool_state = ds~load_ref();
+  pool::jetton_content = ds~load_maybe_ref();
+  pool::buffer_code = ds~load_maybe_ref();
+  pool::liquidity_code = ds~load_maybe_ref();
+
+  ;; pool_state
+  ds = pool_state.begin_parse();
+  pool::is_initialized? = ds~load_int(1);
+  pool::is_killed? = ds~load_int(1);
+  pool::initial_A = ds~load_uint(32);
+  pool::future_A = ds~load_uint(32);
+  pool::initial_A_time = ds~load_uint(64);
+  pool::future_A_time = ds~load_uint(64);
+  pool::fee = ds~load_uint(64);
+  pool::admin_fee = ds~load_uint(64);
+
+  pool::transfer_admin_deadline = ds~load_uint(64);
+  pool::admin_actions_deadline = ds~load_uint(64);
+  pool::future_fee = ds~load_uint(64);
+  pool::future_admin_fee = ds~load_uint(64);
+
+  pool::coins = ds~load_dict();
+  pool::wallets = ds~load_maybe_ref();
+
+  ds = ds~load_ref().begin_parse();
+  pool::balances = ds~load_maybe_ref();
+  pool::admin_balances = ds~load_maybe_ref();
+  pool::precision_mul = ds~load_maybe_ref();
+}
+
+() pool::save_data() impure inline_ref {
+  set_data(begin_cell()
+    .store_slice(pool::admin) ;; 267 bit
+    .store_slice(pool::fee_recipient) ;; 267 bit
+    .store_slice(pool::future_admin) ;; 267 bit
+    .store_coins(pool::liquidity_supply) ;; 124 bit
+    .store_uint(pool::n_coins, 4) ;; 4 bit
+    .store_ref(begin_cell()
+      .store_int(pool::is_initialized?, 1) ;; 1 bit
+      .store_int(pool::is_killed?, 1) ;; 1 bit
+      .store_uint(pool::initial_A, 32) ;; 32 bit
+      .store_uint(pool::future_A, 32) ;; 32 bit
+      .store_uint(pool::initial_A_time, 64) ;; 64 bit
+      .store_uint(pool::future_A_time, 64) ;; 64 bit
+      .store_uint(pool::fee, 64) ;; 64 bit
+      .store_uint(pool::admin_fee, 64) ;; 64 bit
+
+      .store_uint(pool::transfer_admin_deadline, 64) ;; 64 bit
+      .store_uint(pool::admin_actions_deadline, 64) ;; 64 bit
+      .store_uint(pool::future_fee, 64) ;; 64 bit
+      .store_uint(pool::future_admin_fee, 64) ;; 64 bit
+
+      .store_dict(pool::coins) ;; HashmapE 4 uint256
+      .store_maybe_ref(pool::wallets) ;; hashmap
+      .store_ref(begin_cell()
+        .store_maybe_ref(pool::balances) ;; array_in_slice 1 + 1023 bit
+        .store_maybe_ref(pool::admin_balances) ;; array_in_slice 1 + 1023 bit
+        .store_maybe_ref(pool::precision_mul) ;; array_in_slice 1 + 1023 bit
+        .end_cell())
+      .end_cell())
+    .store_maybe_ref(pool::jetton_content)
+    .store_maybe_ref(pool::buffer_code)
+    .store_maybe_ref(pool::liquidity_code)
+    .end_cell()
+  );
+}
+
+tuple _balances() impure inline {
+  return pool::balances.tuple::unpack_grams();
+}
+tuple _admin_balances() impure inline {
+  return pool::admin_balances.tuple::unpack_grams();
+}
+tuple _precision_mul() impure inline {
+  return pool::precision_mul.tuple::unpack_grams();
+}
+
+(
+  slice, slice, int,
+  int, int, int, int, int, int, int, int,
+  cell, cell, cell,
+  slice, int, int, int, int
+) get_info() method_id {
+  pool::load_data();
+  return (
+    pool::admin,
+    pool::fee_recipient,
+    pool::n_coins,
+
+    pool::is_initialized?,
+    pool::is_killed?,
+    pool::initial_A,
+    pool::future_A,
+    pool::initial_A_time,
+    pool::future_A_time,
+    pool::fee,
+    pool::admin_fee,
+
+    pool::coins,
+    pool::wallets.begin_parse().preload_dict(),
+    pool::precision_mul,
+
+    pool::future_admin,
+    pool::transfer_admin_deadline,
+    pool::future_fee,
+    pool::future_admin_fee,
+    pool::admin_actions_deadline
+  );
+}
+
+(
+  int, cell, cell
+) get_reserves() method_id {
+  pool::load_data();
+  return (
+    pool::liquidity_supply,
+    pool::balances,
+    pool::admin_balances
+  );
+}

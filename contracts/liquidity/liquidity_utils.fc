@@ -1,0 +1,20 @@
+#pragma version >=0.4.4;
+#include "../lib/stdlib.fc";
+#include "../lib/common.fc";
+#include "../lib/utils.fc";
+
+cell create_liquidity_data(slice pool, slice owner) inline {
+  return begin_cell()
+    .store_slice(pool)
+    .store_slice(owner)
+    .store_coins(0)
+    .end_cell();
+}
+
+(builder, builder, int) calc_liquidity_wallet_address(slice pool, slice owner, cell liquidity_code) inline {
+  cell init_data = create_liquidity_data(pool, owner);
+  builder state_init = create_state_init(liquidity_code, init_data);
+  int addr = state_init.end_cell().cell_hash();
+  builder liquidity_wallet = create_address(chain::base, addr);
+  return (liquidity_wallet, state_init, addr);
+}

@@ -1,0 +1,16 @@
+#pragma version >=0.4.4;
+#include "../lib/stdlib.fc";
+#include "../lib/common.fc";
+#include "export/liquidity.fc";
+
+int fee::store_liquidity() {
+  int cells = 0
+    + 1 ;;ref_init_data
+    + liquidity_code::cells; ;;ref_init_code
+  int bits = 0
+    + 267 ;;pool
+    + 267 ;;owner
+    + 124 ;;balance (max)
+    + liquidity_code::bits;
+  return get_storage_fee(cells, bits, MIN_STORE_DURATION, false);
+}

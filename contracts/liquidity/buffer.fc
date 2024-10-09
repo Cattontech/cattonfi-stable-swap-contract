@@ -1,0 +1,192 @@
+#pragma version >=0.4.4;
+#include "../lib/stdlib.fc";
+#include "../lib/tuple.fc";
+#include "../lib/common.fc";
+#include "../lib/utils.fc";
+#include "buffer_op.fc";
+
+global slice buffer::pool;
+global slice buffer::owner;
+global cell buffer::balances;
+
+() buffer::load_data() impure {
+  slice ds = get_data().begin_parse();
+  buffer::pool = ds~load_msg_addr();
+  buffer::owner = ds~load_msg_addr();
+  buffer::balances = ds~load_maybe_ref();
+}
+
+() buffer::save_data() impure inline_ref {
+  set_data(begin_cell()
+    .store_slice(buffer::pool)
+    .store_slice(buffer::owner)
+    .store_maybe_ref(buffer::balances)
+    .end_cell()
+  );
+}
+
+{-
+  buffer_token query_id:uint64 min_lp:(VarUInteger 16)
+    c_amounts:(Maybe ^Cell) = InternalMsgBody;
+-}
+() buffer_token(slice sender, slice body) impure inline {
+  int query_id = body~load_uint(64);
+  int min_lp = body~load_coins();
+  cell c_amounts = body~load_maybe_ref();
+
+  throw_unless(err::access_denied, equal_slices(sender, buffer::pool));
+
+  tuple amounts = c_amounts.tuple::unpack_grams();
+  tuple balances = buffer::balances.tuple::unpack_grams();
+
+  int idx = 0;
+  int reserves = 0;
+  balances~tuple::set_len(amounts.tlen(), 0);
+  repeat(amounts.tlen()) {
+    int new_amount = balances.at(idx) + amounts.at(idx);
+    balances~tset(idx, new_amount);
+    reserves += new_amount;
+    idx += 1;
+  }
+  buffer::balances = balances.tuple::pack_grams();
+
+  if (min_lp > 0) & (reserves > 0) {
+    ;; buffer_add_liquidity_notification query_id:uint64 owner:MsgAddress
+    ;;  min_lp:(VarUInteger 16) c_amounts:(Maybe ^Cell) = InternalMsgBody;
+    builder notification = begin_cell()
+      .store_uint(op::buffer_add_liquidity_notification, 32)
+      .store_uint(query_id, 64)
+      .store_slice(buffer::owner)
+      .store_coins(min_lp)
+      .store_maybe_ref(buffer::balances);
+    send_msg(false, buffer::pool.to_builder(), null(), notification, 0, msg::unreserved_balance + msg::destroy_if_zero);
+    buffer::balances = null();
+  } else {
+    send_excesses(buffer::owner, 0, msg::remaining_value + msg::ignore_errors);
+  }
+}
+
+{-
+  buffer_add_liquidity query_id:uint64 min_lp:(VarUInteger 16) c_amounts:(Maybe ^Cell) = InternalMsgBody;
+-}
+() buffer_add_liquidity(slice sender, slice body) impure inline {
+  {-
+  int fee = fee::buffer_add_liquidity();
+  int msg_val = get_incoming_value().pair_first();
+  ;; ensure enough TON to execute transactions
+  throw_unless(err::insufficient_fee, msg_val >= fee);
+  -}
+
+  int query_id = body~load_uint(64);
+  int min_lp = body~load_coins();
+  cell c_amounts = body~load_maybe_ref();
+
+  throw_unless(err::access_denied, equal_slices(sender, buffer::owner));
+
+  tuple amounts = c_amounts.tuple::unpack_grams();
+  tuple balances = buffer::balances.tuple::unpack_grams();
+  throw_unless(err::insufficient_funds, amounts.tlen() == balances.tlen());
+
+  int idx = 0;
+  int total = 0;
+  int reserves = 0;
+  repeat(amounts.tlen()) {
+    int amount = amounts.at(idx);
+    total += amount;
+
+    int new_amount = balances.at(idx) - amount;
+    throw_unless(err::insufficient_funds, new_amount >= 0);
+
+    balances~tset(idx, new_amount);
+    reserves += new_amount;
+    idx += 1;
+  }
+  throw_if(err::zero_amount, total == 0);
+  buffer::balances = balances.tuple::pack_grams();
+
+  int send_mode = msg::remaining_value;
+  if reserves == 0 {
+    buffer::balances = null();
+    send_mode = msg::unreserved_balance + msg::destroy_if_zero;
+  }
+
+  ;; buffer_add_liquidity_notification query_id:uint64 owner:MsgAddress
+  ;;  min_lp:(VarUInteger 16) c_amounts:(Maybe ^Cell) = InternalMsgBody;
+  builder notification = begin_cell()
+    .store_uint(op::buffer_add_liquidity_notification, 32)
+    .store_uint(query_id, 64)
+    .store_slice(buffer::owner)
+    .store_coins(min_lp)
+    .store_maybe_ref(c_amounts);
+  send_msg(false, buffer::pool.to_builder(), null(), notification, 0, send_mode); 
+}
+
+{-
+  buffer_refund_me query_id:uint64 = InternalMsgBody;
+-}
+() buffer_refund_me(slice sender, slice body) impure inline {
+  {-
+  int fee = fee::buffer_refund_me();
+  int msg_val = get_incoming_value().pair_first();
+  ;; ensure enough TON to execute transactions
+  throw_unless(err::insufficient_fee, msg_val > fee);
+  -}
+
+  int query_id = body~load_uint(64);
+
+  throw_unless(err::access_denied, equal_slices(sender, buffer::owner));
+
+  ;; buffer_refund_me_notification query_id:uint64 owner:MsgAddress
+  ;;   c_amounts:(Maybe ^Cell) = InternalMsgBody;
+  builder notification = begin_cell()
+    .store_uint(op::buffer_refund_me_notification, 32)
+    .store_uint(query_id, 64)
+    .store_slice(buffer::owner)
+    .store_maybe_ref(buffer::balances);
+  send_msg(false, buffer::pool.to_builder(), null(), notification, 0, msg::unreserved_balance + msg::destroy_if_zero);
+  buffer::balances = null();
+}
+
+() route_internal_message(int flags, slice sender, slice body) impure inline {
+  if flags & 1 {
+    return ();
+  }
+
+  int op = body~load_uint(32);
+
+  ;; receive from `pool`
+  if op == op::buffer_token {
+    return buffer_token(sender, body);
+  }
+  ;; receive from `user`
+  if op == op::buffer_add_liquidity {
+    return buffer_add_liquidity(sender, body);
+  }
+  ;; receive from `user`
+  if op == op::buffer_refund_me {
+    return buffer_refund_me(sender, body);
+  }
+
+  ;; top up TON balance
+  if op == op::top_up {
+    throw(0); ;; do nothing
+  }
+
+  throw(err::invalid_op);
+}
+
+() recv_internal(cell in_msg_full, slice in_msg_body) impure {
+  ;; ~strdump("buffer:get_storage_fees"); ~dump(get_storage_fees());
+  slice cs = in_msg_full.begin_parse();
+  int flags = cs~load_uint(4);
+  slice sender = cs~load_msg_addr();
+
+  buffer::load_data();
+  route_internal_message(flags, sender, in_msg_body);
+  buffer::save_data();
+}
+
+(slice, slice, cell) get_buffer_data() method_id {
+  buffer::load_data();
+  return (buffer::pool, buffer::owner, buffer::balances);
+}

@@ -1,0 +1,168 @@
+#pragma version >=0.4.4;
+#include "stdlib.fc";
+#include "common.fc";
+
+() when::chain(int workchain, slice address) impure inline {
+  if ~ address.addr_none?() {
+    (int wc, _) = parse_std_addr(address);
+    throw_unless(err::workchain, wc == workchain);
+  }
+}
+
+builder to_builder(slice s) inline {
+  return begin_cell().store_slice(s);
+}
+slice to_slice(builder b) inline {
+  return b.end_cell().begin_parse();
+}
+
+builder store_state_init(builder b, builder state_init) inline {
+  return state_init.null?()
+    ? b.store_uint(0, 1)
+    : b.store_uint(2 + 0, 1 + 1).store_builder(state_init);
+}
+
+builder store_body(builder b, builder body) inline {
+  return body.builder_bits() <= (513 - 265)
+    ? b.store_uint(0, 1).store_builder(body)
+    : b.store_maybe_ref(body.end_cell());
+}
+
+builder store_log(builder b, builder log) inline {
+  return log.builder_bits() <= (654 - 265)
+    ? b.store_uint(0, 1).store_builder(log)
+    : b.store_maybe_ref(log.end_cell());
+}
+
+int forward_fee_of(cell msg) impure inline {
+  slice cs = msg.begin_parse();
+  ;; https://github.com/ton-blockchain/ton/blob/140320b0dbe0bdd9fd954b6633a3677acc75a8e6/crypto/vm/tonops.cpp#L1278
+  var (c_cells, c_bits, _) = msg.compute_data_size((1 << 63) - 1);
+  int cs_bits = cs.slice_bits();
+  int forward_fee = get_forward_fee(c_cells - 1, c_bits - cs_bits, false);
+  ;; ~strdump("forward_fee"); ~dump([c_cells, c_bits, cs_bits, forward_fee]);
+  return forward_fee;
+}
+
+;; Returns compute fee so far (including this instruction and gas_will_be_use).
+int calc_compute_fee(int gas_will_be_use) impure inline {
+  int gas_used = gas_will_be_use
+    + 18 ;; gas_used += get_gas_used() => ADD(18 gas)
+    + 44; ;; get_compute_fee(gas_used, false); => FALSE(18 gas) + GETGASFEE(26 gas) = 44
+  gas_used += get_gas_used();
+  int compute_fee = get_compute_fee(gas_used, false);
+  return compute_fee;
+}
+
+;; 6 + 267 + 124 + 1 + 4 + 4 + 64 + 32 + 2 + 5 + 1 + 513
+cell build_msg(int bounceable?, builder dst, builder state_init, builder body, int coins, int mode) inline_ref {
+  ;; extra_currencies$_ dict:(HashmapE 32 (VarUInteger 32)) 
+  ;;   = ExtraCurrencyCollection;
+  ;; currencies$_ grams:Grams other:ExtraCurrencyCollection 
+  ;;   = CurrencyCollection;
+  ;; int_msg_info$0 ihr_disabled:Bool bounce:Bool bounced:Bool
+  ;;   src:MsgAddress dest:MsgAddressInt
+  ;;   value:CurrencyCollection ihr_fee:Grams fwd_fee:Grams
+  ;;   created_lt:uint64 created_at:uint32 = CommonMsgInfoRelaxed;
+  ;; message$_ {X:Type} info:CommonMsgInfoRelaxed
+  ;;   init:(Maybe (Either StateInit ^StateInit))
+  ;;   body:(Either X ^X) = MessageRelaxed X;
+  cell msg = begin_cell()
+    .store_uint(bounceable? ? 0x18 : 0x10, 6) ;; 011000 or 010000
+    .store_builder(dst)
+    .store_coins(coins)
+    .store_uint(0, 1 + 4 + 4 + 64 + 32)
+    .store_state_init(state_init)
+    .store_body(body)
+    .end_cell();
+  return msg;
+}
+
+int send_msg(int bounceable?, builder dst, builder state_init, builder body, int coins, int mode) impure inline_ref {
+  cell msg = build_msg(bounceable?, dst, state_init, body, coins, mode);
+  send_raw_message(msg, mode);
+  ;; return forward_fee_of(msg);
+  return 0;
+}
+
+;; 6 + 9 + 256 + 64 + 32 + 1 + 1 + 654
+int emit_log(int topic, builder log) impure inline_ref {
+  ;; addr_extern$01 len:(## 9) external_address:(bits len) = MsgAddressExt;
+  ;; ext_out_msg_info$11 src:MsgAddress dest:MsgAddressExt
+  ;;   created_lt:uint64 created_at:uint32 = CommonMsgInfoRelaxed;
+  ;; message$_ {X:Type} info:CommonMsgInfoRelaxed
+  ;;   init:(Maybe (Either StateInit ^StateInit))
+  ;;   body:(Either X ^X) = MessageRelaxed X;
+  cell msg = begin_cell()
+    .store_uint(0x31, 2 + 2 + 2) ;; 110001
+    .store_uint(256, 9)
+    .store_uint(topic, 256)
+    .store_uint(0, 64 + 32 + 1)
+    .store_log(log)
+    .end_cell();
+  send_raw_message(msg, msg::regular);
+  ;; return forward_fee_of(msg);
+  return 0;
+}
+
+builder create_state_init(cell code, cell data) inline {
+  ;; _ split_depth:(Maybe (## 5)) special:(Maybe TickTock)
+  ;;   code:(Maybe ^Cell) data:(Maybe ^Cell)
+  ;;   library:(HashmapE 256 SimpleLib) = StateInit;
+  return begin_cell()
+    .store_uint(6, 5) ;; 00110
+    .store_ref(code)
+    .store_ref(data);
+}
+
+builder create_address(int wc, int addr) inline_ref {
+  ;; addr_std$10 anycast:(Maybe Anycast)
+  ;;   workchain_id:int8 address:bits256  = MsgAddressInt;
+  return begin_cell()
+    .store_uint(4, 3) ;; 100
+    .store_int(wc, 8)
+    .store_uint(addr, 256);
+}
+
+int send_excesses(slice dest, int coins, int mode) impure inline_ref {
+  var excesses = begin_cell()
+    .store_uint(op::excesses, 32)
+    .store_uint(0, 64); ;; query_id
+  return send_msg(false, dest.to_builder(), null(), excesses, coins, mode);
+}
+
+int send_token(
+  builder from,
+  slice to,
+  slice response,
+  int query_id,
+  int amount,
+  int coins,
+  int reason_code,
+  int mode
+) impure inline_ref {
+  ;; transfer query_id:uint64 amount:(VarUInteger 16) destination:MsgAddress
+  ;;   response_destination:MsgAddress custom_payload:(Maybe ^Cell)
+  ;;   forward_ton_amount:(VarUInteger 16) forward_payload:(Either Cell ^Cell)
+  ;;   = InternalMsgBody;
+  var transfer = begin_cell()
+    .store_uint(op::transfer, 32)
+    .store_uint(query_id, 64) ;; query_id
+    .store_coins(amount) ;; amount
+    .store_slice(to) ;; destination
+    .store_slice(response) ;; response_destination
+    .store_dict(null()) ;; custom_payload
+    .store_coins(0) ;; forward_ton_amount
+    .store_uint(0, 1) ;; mark forward_payload as Cell
+    .store_uint(reason_code, 32); ;; forward_payload with send_token_reason
+  return send_msg(false, from, null(), transfer, coins, mode);
+}
+
+int send_pay_to(slice dest, int query_id, int amount, int coins, int reason_code, int mode) impure inline_ref {
+  var pay_to = begin_cell()
+    .store_uint(op::pay_to, 32)
+    .store_uint(query_id, 64) ;; query_id
+    .store_coins(amount) ;; ton_amount (used for log)
+    .store_uint(reason_code, 32); ;; (used for log)
+  return send_msg(false, dest.to_builder(), null(), pay_to, amount + coins, mode);
+}

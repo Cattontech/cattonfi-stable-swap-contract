@@ -1,0 +1,270 @@
+#pragma version >=0.4.4;
+#include "../lib/stdlib.fc";
+#include "../lib/tuple.fc";
+#include "../lib/common.fc";
+#include "../lib/utils.fc";
+#include "../plain_pool/pool_op.fc";
+#include "../plain_pool/pool_utils.fc";
+#include "factory_op.fc";
+
+;; The admin address.
+global slice factory::admin;
+;; The fee recipient address.
+global slice factory::fee_recipient;
+;; The hashmap to validate pool is initialized
+global cell factory::pools;
+;; Store plain pool codes.
+global cell factory::plain_pool;
+;; Store meta pool codes.
+global cell factory::meta_pool;
+
+slice type::plain_pool() asm "b{00} PUSHSLICE";
+slice type::meta_pool() asm "b{01} PUSHSLICE";
+
+() factory::load_data() impure {
+  slice ds = get_data().begin_parse();
+  factory::admin = ds~load_msg_addr();
+  factory::fee_recipient = ds~load_msg_addr();
+  factory::pools = ds~load_dict();
+  factory::plain_pool = ds~load_maybe_ref();
+  factory::meta_pool = ds~load_maybe_ref();
+}
+
+() factory::save_data() impure inline_ref {
+  set_data(begin_cell()
+    .store_slice(factory::admin)
+    .store_slice(factory::fee_recipient)
+    .store_dict(factory::pools)
+    .store_maybe_ref(factory::plain_pool)
+    .store_maybe_ref(factory::meta_pool)
+    .end_cell()
+  );
+}
+
+(int, cell, cell, cell) unpack_plain_pool() impure {
+  slice ds = factory::plain_pool.begin_parse();
+  int admin_fee = ds~load_uint(64);
+  cell pool_code = ds~load_ref();
+  cell buffer_code = ds~load_ref();
+  cell liquidity_code = ds~load_ref();
+  return (admin_fee, pool_code, buffer_code, liquidity_code);
+}
+
+int math::pow(int x, int e) {
+  if (e == 0) { return 1; }
+  if (e == 1) { return x; }
+  int p = math::pow(x, (e / 2));
+  p = p * p;
+
+  if ((e % 2) == 1) { p = p * x; }
+  return p;
+}
+
+{-
+  plain_pool_params$_ amp:uint32 fee:uint64
+    coins:(Maybe ^Cell) c_decimals:^Cell = PlainPoolParams;
+-}
+(int, int, int, cell, cell, cell) validate_plain_pool_params(slice params) inline_ref {
+  int amp = params~load_uint(32);
+  int fee = params~load_uint(64);
+  cell coins = params~load_dict();
+  cell c_decimals = params~load_ref();
+
+  throw_unless(err::amp_out_of_range, (amp > 0) & (amp <= 10000)); ;; 1e4
+  throw_unless(err::fee_exceeded_maximum, fee <= 5000000000); ;; 5e9: 50%
+
+  var (n_coins, _, _) = udict_get_max?(coins, 4);
+  n_coins = n_coins + 1;
+  tuple decimals = c_decimals.tuple::unpack_grams();
+  throw_unless(err::decimals_len, n_coins == decimals.tlen());
+
+  int idx = 0;
+  repeat(n_coins) {
+    ;; validate decimals
+    int decimal = decimals.at(idx);
+    throw_unless(err::decimal_exceeded_maximum, decimal <= 18);
+    decimals~tset(idx, math::pow(10, 18 - decimal));
+
+    ;; validate coins
+    var (coin_address, is_exist?) = coins.udict_get?(4, idx);
+    throw_unless(err::no_coin, is_exist? & (slice_bits(coin_address) == 256));
+    idx += 1;
+  }
+  cell c_precision_mul = decimals.tuple::pack_grams();
+  return (n_coins, amp, fee, coins, c_precision_mul, c_decimals);
+}
+
+slice get_plain_pool_address(slice params) method_id {
+  factory::load_data();
+  var (n_coins, amp, fee, coins, c_precision_mul, _) = validate_plain_pool_params(params);
+  var (admin_fee, pool_code, _, _) = unpack_plain_pool();
+  cell init_data = init_plain_pool_data(my_address(), n_coins, amp, fee, admin_fee, coins, c_precision_mul);
+  var (pool_addr, _, _) = calc_plain_pool_address(init_data, pool_code);
+  return pool_addr.end_cell().begin_parse();
+}
+
+{-
+  plain_pool_params$_ amp:uint32 fee:uint64
+    coins:(Maybe ^Cell) c_decimals:^Cell = PlainPoolParams;
+
+  wallets$_ wallet_idx:(HashmapE 256 uint4)
+    idx_wallet:(HashmapE 4 uint256) = Wallets;
+
+  factory_create_plain_pool query_id:uint64 wallets:^Wallets
+    jetton_content::^Cell params:PlainPoolParams = InternalMsgBody;
+-}
+() factory_create_plain_pool(slice sender, slice body) impure inline {
+  int query_id = body~load_uint(64);
+  cell wallets = body~load_ref();
+  cell jetton_content = body~load_ref();
+
+  var (n_coins, amp, fee, coins, c_precision_mul, c_decimals) = validate_plain_pool_params(body);
+  var (admin_fee, pool_code, buffer_code, liquidity_code) = unpack_plain_pool();
+  throw_unless(err::admin_fee_exceeded_maximum, admin_fee <= 10000000000); ;; 1e10: 100%
+
+  cell init_data = init_plain_pool_data(my_address(), n_coins, amp, fee, admin_fee, coins, c_precision_mul);
+  var (pool_addr, state_init, pool_key) = calc_plain_pool_address(init_data, pool_code);
+
+  ;; mark pool as plain_pool
+  cell pool_info = begin_cell()
+    .store_slice(type::plain_pool())
+    .store_dict(coins)
+    .store_ref(c_decimals)
+    .end_cell();
+  factory::pools~udict_set_ref(256, pool_key, pool_info);
+
+  slice ds = wallets.begin_parse();
+  cell wallet_idx = ds~load_dict();
+  cell idx_wallet = ds~load_dict();
+  int idx = 0;
+  repeat(n_coins) {
+    var (data, is_exist?) = idx_wallet.udict_get?(4, idx);
+    throw_unless(err::no_wallet, is_exist? & (slice_bits(data) == 256));
+    (data, is_exist?) = wallet_idx.udict_get?(256, data~load_uint(256));
+    throw_unless(err::no_wallet, is_exist? & (slice_bits(data) == 4) & (data~load_uint(4) == idx));
+    idx += 1;
+  }
+
+  builder pool_init = begin_cell()
+    .store_uint(op::pool_init, 32)
+    .store_uint(query_id, 64)
+    .store_slice(sender)
+    .store_slice(factory::admin)
+    .store_slice(factory::fee_recipient)
+    .store_ref(wallets)
+    .store_ref(jetton_content)
+    .store_ref(buffer_code)
+    .store_ref(liquidity_code);
+  send_msg(true, pool_addr, state_init, pool_init, 0, msg::remaining_value);
+}
+
+;;; upgrade query_id:uint64 new_code:^Cell = InternalMsgBody;
+() upgrade(slice sender, slice body) impure inline {
+  body~skip_bits(64); ;; query_id
+  cell new_code = body~load_ref();
+
+  throw_unless(err::access_denied, equal_slices(sender, factory::admin));
+  set_code(new_code);
+
+  send_excesses(sender, 0, msg::remaining_value + msg::ignore_errors);
+}
+
+;; receive from `admin`
+() factory_manager(slice sender, int op, slice body) impure {
+  throw_unless(err::access_denied, equal_slices(sender, factory::admin));
+
+  if op == op::factory_tranfer_admin {
+    body~skip_bits(64); ;; query_id
+    slice new_admin = body~load_msg_addr();
+    factory::admin = new_admin;
+  }
+  elseif op == op::factory_new_fee_recipient {
+    body~skip_bits(64); ;; query_id
+    slice new_fee_recipient = body~load_msg_addr();
+    factory::fee_recipient = new_fee_recipient;
+  }
+  elseif op == op::factory_new_plain_pool {
+    body~skip_bits(64); ;; query_id
+    cell plain_pool = body~load_ref();
+    factory::plain_pool = plain_pool;
+  }
+  elseif op == op::factory_new_meta_pool {
+    body~skip_bits(64); ;; query_id
+    cell meta_pool = body~load_ref();
+    factory::meta_pool = meta_pool;
+  }
+  elseif op == op::upgrade {
+    body~skip_bits(64); ;; query_id
+    cell new_code = body~load_ref();
+    set_code(new_code);
+  }
+
+  else {
+    throw(err::invalid_op);
+  }
+  send_excesses(sender, 0, msg::remaining_value + msg::ignore_errors);
+}
+
+() on_bounce(slice sender, slice body) impure {
+  body~skip_bits(32);
+  int op = body~load_uint(32);
+  body~skip_bits(64); ;; query_id
+
+  if op == op::factory_create_plain_pool {
+    ;; remove state initialized
+    var (_, pool_key) = parse_std_addr(sender);
+    factory::pools~udict_delete?(256, pool_key);
+    return (); ;; return to save factory::pools
+  }
+
+  throw(0); ;; exit zero_code to send excesses
+}
+
+() route_internal_message(int flags, slice sender, slice body) impure inline {
+  if flags & 1 {
+    return on_bounce(sender, body);
+  }
+
+  int op = body~load_uint(32);
+
+  ;; receive from `user`
+  if op == op::factory_create_plain_pool {
+    return factory_create_plain_pool(sender, body);
+  }
+
+  ;; top up TON balance
+  if op == op::top_up {
+    throw(0); ;; do nothing
+  }
+
+  ;; receive from `admin`
+  return factory_manager(sender, op, body);
+}
+
+() recv_internal(cell in_msg_full, slice in_msg_body) impure {
+  ;; ~strdump("buffer:get_storage_fees"); ~dump(get_storage_fees());
+  slice cs = in_msg_full.begin_parse();
+  int flags = cs~load_uint(4);
+  slice sender = cs~load_msg_addr();
+
+  factory::load_data();
+  route_internal_message(flags, sender, in_msg_body);
+  factory::save_data();
+}
+
+(slice, slice, cell) get_info() method_id {
+  factory::load_data();
+  return (
+    factory::admin,
+    factory::fee_recipient,
+    factory::pools
+  );
+}
+
+(cell, cell) get_pool_template() method_id {
+  factory::load_data();
+  return (
+    factory::plain_pool,
+    factory::meta_pool
+  );
+}

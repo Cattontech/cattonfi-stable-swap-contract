@@ -1,0 +1,80 @@
+#pragma version >=0.4.4;
+
+;; 3 years in seconds
+const int MIN_STORE_DURATION = 60 * 60 * 24 * 365 * 3;
+
+;; -----------------------------------------------------------------------
+;; Chain
+;; -----------------------------------------------------------------------
+const int chain::main = -1;
+const int chain::base = 0;
+
+
+;; -----------------------------------------------------------------------
+;; Internal Message Mode
+;; -----------------------------------------------------------------------
+const int msg::regular = 0;
+const int msg::pay_gas_separately = 1;
+const int msg::ignore_errors = 2;
+const int msg::bounce_if_failed = 16;
+const int msg::destroy_if_zero = 32;
+const int msg::remaining_value = 64;
+const int msg::unreserved_balance = 128;
+
+const int reserve::exact = 0;
+const int reserve::all_but_amount = 1;
+const int reserve::at_most = 2;
+const int reserve::add_original_balance = 4;
+const int reserve::negate = 8;
+const int reserve::bounce_if_failed = 16;
+
+
+;; -----------------------------------------------------------------------
+;; OpCode
+;; -----------------------------------------------------------------------
+const int op::top_up = "top_up"c;
+const int op::pay_to = "pay_to"c;
+const int op::upgrade = "upgrade"c;
+
+;;; Jetton Liquidity
+const int op::transfer = 0xf8a7ea5;
+const int op::transfer_notification = 0x7362d09c;
+const int op::internal_transfer = 0x178d4519;
+const int op::excesses = 0xd53276db;
+const int op::burn = 0x595f07bc;
+const int op::burn_notification = 0x7bdd97de;
+
+
+;; -----------------------------------------------------------------------
+;; ErrorCode
+;; -----------------------------------------------------------------------
+const int err::insufficient_fee = 101;
+const int err::invalid_op = 102;
+const int err::workchain = 103;
+const int err::access_denied = 104;
+
+const int err::insufficient_funds = 105;
+const int err::receiver_is_sender = 106;
+
+const int err::zero_amount = 107;
+const int err::slippage_exceeded = 108;
+const int err::calculation_failure = 109;
+const int err::requires_all_tokens = 110;
+const int err::same_coin = 111;
+const int err::exceed_reserve = 112;
+const int err::zero_liquidity_supply = 113;
+const int err::zero_liquidity_burned = 114;
+const int err::during_ramp = 115;
+const int err::insufficient_time = 116;
+const int err::amp_out_of_range = 117;
+const int err::future_amp_too_low = 118;
+const int err::future_amp_too_high = 119;
+const int err::active_action = 120;
+const int err::no_active_action = 121;
+const int err::fee_exceeded_maximum = 122;
+const int err::admin_fee_exceeded_maximum = 123;
+const int err::killed = 124;
+const int err::not_initialized = 125;
+const int err::initialized = 126;
+
+const int err::no_wallet = 127;

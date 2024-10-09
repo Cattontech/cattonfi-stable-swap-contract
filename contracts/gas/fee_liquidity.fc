@@ -1,0 +1,36 @@
+#pragma version >=0.4.4;
+#include "../lib/stdlib.fc";
+#include "export/liquidity.fc";
+#include "store_liquidity.fc";
+
+int fee::send_liquidity() {
+  int storage_fee = fee::store_liquidity();
+  int compute_gas = gas::transfer + gas::internal_transfer;
+  int compute_fee = get_compute_fee(compute_gas, false);
+
+  ;; additional fwd fees related to initstate in iternal_transfer
+  int cells = 0
+    + 1 ;;ref_init_data
+    + liquidity_code::cells; ;;ref_init_code
+  int bits = 0
+    + 267 ;;pool (state_init_data)
+    + 267 ;;owner (state_init_data)
+    + 4 ;;balance (state_init_data)
+    + liquidity_code::bits; ;;(state_init_code)
+  int additional_fwd_fee = get_simple_forward_fee(cells, bits, false);
+
+  return storage_fee + compute_fee + additional_fwd_fee;
+}
+
+int fee::burn_liquidity() {
+  ;; additional burn_notification compute gas maximum 50000
+  int compute_gas = gas::burn + 50000;
+  int compute_fee = get_compute_fee(compute_gas, false);
+
+  ;; additional fwd fees related to owner in burn_notification
+  int additional_fwd_fee = get_simple_forward_fee(0, 267, false);
+  ;; foward on_bounce, send_excesses if happens revert_burn_tokens
+  int fwd_excesses = 2 * get_forward_fee(0, 0, false);
+
+  return compute_fee + additional_fwd_fee + fwd_excesses;
+}

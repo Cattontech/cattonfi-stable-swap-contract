@@ -1,0 +1,20 @@
+#pragma version >=0.4.4;
+#include "../lib/stdlib.fc";
+#include "../lib/common.fc";
+#include "../lib/utils.fc";
+
+cell create_buffer_data(slice pool, slice owner) inline {
+  return begin_cell()
+    .store_slice(pool) ;;pool (267 bit)
+    .store_slice(owner) ;;owner (267 bit)
+    .store_maybe_ref(null()) ;;balances (1 bit)
+    .end_cell();
+}
+
+(builder, builder, int) calc_buffer_address(slice pool, slice owner, cell buffer_code) inline {
+  cell init_data = create_buffer_data(pool, owner);
+  builder state_init = create_state_init(buffer_code, init_data);
+  int addr = state_init.end_cell().cell_hash();
+  builder buffer_addr = create_address(chain::base, addr);
+  return (buffer_addr, state_init, addr);
+}

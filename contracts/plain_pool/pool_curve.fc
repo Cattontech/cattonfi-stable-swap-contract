@@ -1,0 +1,666 @@
+#pragma version >=0.4.4;
+#include "../lib/common.fc";
+#include "../lib/tuple.fc";
+#include "pool_store.fc";
+
+;; Reference
+;; https://github.com/curvefi/curve-contract/blob/master/contracts/pools/3pool/StableSwap3Pool.vy
+;; https://github.com/curvefi/curve-contract/blob/master/contracts/pools/steth/StableSwapSTETH.vy
+
+;; Fixed constants
+const int PRECISION = 1000000000000000000; ;; 1e18
+
+;; Fees constants
+const int FEE_DENOMINATOR = 10000000000; ;; 1e10
+const int MAX_ADMIN_FEE = 10000000000; ;; 1e10: 100%
+const int MAX_FEE = 5000000000; ;; 5e9: 50%
+
+;; Maximum amplification coefficient.
+const int MAX_AMP = 1000000; ;; 1e6
+;; Max amplification change
+const int MAX_AMP_CHANGE = 10;
+const int A_PRECISION = 100;
+
+;; Minimum ramp time, in seconds.
+const int MIN_RAMP_TIME = 86400;
+const int ADMIN_ACTIONS_DELAY = 3 * 86400;
+
+;; Compute the amplification coefficient (A).
+;; [^stableswap]: [Egorov, "StableSwap," 2019.](https://curve.fi/files/stableswap-paper.pdf)
+;; - The amplification coefficient is used to determine the slippage incurred when
+;;   performing swaps. The lower it is, the closer the invariant is to the constant product[^stableswap].
+;; - The amplication coefficient linearly increases with respect to time,
+;;   based on the [`pool::initial_A_time`] and [`pool::future_A_time`] parameters.
+int _A() impure inline {
+  int t1 = pool::future_A_time;
+  int A1 = pool::future_A;
+  int block_time = now();
+
+  if block_time < t1 {
+    ;; handle ramping up and down of A
+    int A0 = pool::initial_A;
+    int t0 = pool::initial_A_time;
+    ;; expressions in uint256 cannot have negative numbers, thus "if"
+    if A1 > A0 {
+      ;; ramping up
+      return A0 + (A1 - A0) * (block_time - t0) / (t1 - t0);
+    } else {
+      ;; ramping down
+      return A0 - (A0 - A1) * (block_time - t0) / (t1 - t0);
+    }
+  } else { ;; when t1 == 0 or block.time >= t1
+    return A1;
+  }
+}
+
+tuple _xp() impure inline {
+  tuple balances = _balances();
+  tuple precision_mul = _precision_mul();
+
+  int idx = 0;
+  repeat(pool::n_coins) {
+    balances~tset(idx, balances.at(idx) * precision_mul.at(idx));
+    idx += 1;
+  }
+  return balances;
+}
+
+;; @notice Convert balance tokens to decimals 18
+;; @return Token balances in decimals 18
+tuple _xp_mem(tuple balances) impure inline {
+  tuple precision_mul = _precision_mul();
+  int idx = 0;
+  repeat(pool::n_coins) {
+    balances~tset(idx, balances.at(idx) * precision_mul.at(idx));
+    idx += 1;
+  }
+  return balances;
+}
+
+;; D invariant calculation in non-overflowing integer operations iteratively
+;; A * sum(x_i) * n**n + D = A * D * n**n + D**(n+1) / (n**n * prod(x_i))
+;; Converging solution:
+;; D[j+1] = (A * n**n * sum(x_i) - D[j]**(n+1) / (n**n prod(x_i))) / (A * n**n - 1)
+int get_D(tuple xp, int amp) impure inline {
+  int S = 0;
+  int idx = 0;
+  repeat(pool::n_coins) {
+    S += xp.at(idx);
+    idx += 1;
+  }
+  if S == 0 {
+    return 0;
+  }
+
+  int D = S;
+  int Dprev = 0;
+  int Ann = amp * pool::n_coins;
+  int i = 0;
+  while (i < 256) {
+    int D_P = D;
+
+    int idx = 0;
+    repeat(pool::n_coins) {
+      D_P = D_P * D / (xp.at(idx) * pool::n_coins + 1);
+      idx += 1;
+    }
+
+    Dprev = D;
+    D = (Ann * S / A_PRECISION + D_P * pool::n_coins) * D / ((Ann - A_PRECISION) * D / A_PRECISION + (pool::n_coins + 1) * D_P);
+    ;; Equality with the precision of 1
+    if D > Dprev {
+      if D - Dprev <= 1 {
+        return D;
+      }    
+    } else {
+      if Dprev - D <= 1 {
+        return D;
+      }
+    }
+    i += 1;
+  }
+
+  ;; convergence typically occurs in 4 rounds or less, this should be unreachable!
+  ;; if it does happen the pool is borked and LPs can withdraw via `remove_liquidity`
+  throw(err::calculation_failure);
+  return D; ;; compiler require code have to return
+}
+
+int get_D_mem(tuple balances, int amp) impure inline {
+  return get_D(_xp_mem(balances), amp);
+}
+
+;; @notice The current virtual price of the pool LP token
+;; @dev Useful for calculating profits
+;; @return LP token virtual price normalized to 1e18
+int get_virtual_price() method_id {
+  pool::load_data();
+  if pool::liquidity_supply == 0 {
+    return 0;
+  }
+  int D = get_D(_xp(), _A());
+  ;; # D is in the units similar to DAI (e.g. converted to precision 1e18)
+  ;; # When balanced, D = n * x_u - total virtual value of the portfolio
+  return D * PRECISION / pool::liquidity_supply;
+}
+
+;; @notice Calculate addition or reduction in token supply from a deposit or withdrawal
+;; @dev This calculation accounts for slippage, but not fees.
+;;      Needed to prevent front-running, not for precise calculations!
+;; @param amounts Amount of each coin being deposited
+;; @param is_deposit set True for deposits, False for withdrawals
+;; @return Expected amount of LP tokens received
+int calc_token_amount(cell c_amounts, int is_deposit) method_id {
+  pool::load_data();
+
+  tuple amounts = c_amounts.tuple::unpack_grams();
+
+  int amp = _A();
+  tuple balances = _balances();
+  int D0 = get_D_mem(balances, amp);
+
+  int idx = 0;
+  repeat(pool::n_coins) {
+    if is_deposit {
+      balances~tset(idx, balances.at(idx) + amounts.at(idx));
+    } else {
+      balances~tset(idx, balances.at(idx) - amounts.at(idx));
+    }
+    idx += 1;
+  }
+  int D1 = get_D_mem(balances, amp);
+  int token_amount = pool::liquidity_supply;
+  int diff = is_deposit ? (D1 - D0) : (D0 - D1);
+  if is_deposit & (token_amount == 0) {
+    return D1; ;; First add liquidity D0 = 0
+  }
+  return diff * token_amount / D0;
+}
+
+;; @notice Deposit coins into the pool
+;; @param amounts List of amounts of coins to deposit
+;; @param min_mint_amount Minimum amount of LP tokens to mint from the deposit
+;; @return Amount of LP tokens received by depositing
+int add_liquidity(tuple amounts, int min_lp_amount) impure inline {
+  throw_unless(err::not_initialized, pool::is_initialized?);
+  throw_if(err::killed, pool::is_killed?);
+
+  ;; Initial invariant
+  int amp = _A();
+  tuple old_balances = _balances();
+  tuple store_balances = old_balances;
+  tuple store_admin_balances = _admin_balances();
+  int D0 = get_D_mem(old_balances, amp);
+
+  int token_supply = pool::liquidity_supply;
+  tuple new_balances = old_balances;
+  int idx = 0;
+  repeat(pool::n_coins) {
+    int amount = amounts.at(idx);
+    if token_supply == 0 {
+      ;; initial deposit requires all tokens
+      throw_if(err::requires_all_tokens, amount == 0);
+    }
+    new_balances~tset(idx, new_balances.at(idx) + amount);
+    idx += 1;
+  }
+
+  ;; Invariant after change
+  int D1 = get_D_mem(new_balances, amp);
+  throw_unless(err::calculation_failure, D1 > D0);
+
+  ;; We need to recalculate the invariant accounting for fees
+  ;; to calculate fair user's share
+  int mint_amount = 0;
+  int D2 = 0;
+  if token_supply > 0 {
+    ;; Only account for fees if we are not the first to deposit
+    ;; adjusted_fee_numerator: uint256 = fee * N_COINS / (4 * (N_COINS - 1))
+    ;; The number 4 comes from Curve, originating from some sort of calculus
+    ;; https://github.com/curvefi/curve-contract/blob/e5fb8c0e0bcd2fe2e03634135806c0f36b245511/tests/simulation.py#L124
+    int fee = pool::fee * pool::n_coins / (4 * (pool::n_coins - 1));
+    int idx = 0;
+    repeat(pool::n_coins) {
+      int ideal_balance = D1 * old_balances.at(idx) / D0;
+      int difference = ideal_balance > new_balances.at(idx)
+        ? (ideal_balance - new_balances.at(idx))
+        : (new_balances.at(idx) - ideal_balance);
+
+      int _fee = fee * difference / FEE_DENOMINATOR;
+      int admin_fee = _fee * pool::admin_fee / FEE_DENOMINATOR;
+
+      store_admin_balances~tset(idx, store_admin_balances.at(idx) + admin_fee);
+      store_balances~tset(idx, store_balances.at(idx) + amounts.at(idx) - admin_fee);
+      new_balances~tset(idx, new_balances.at(idx) - _fee);
+      idx += 1;
+    }
+    D2 = get_D_mem(new_balances, amp);
+    mint_amount = token_supply * (D2 - D0) / D0;
+  } else {
+    mint_amount = D1;
+    store_balances = new_balances;
+  }
+
+  throw_unless(err::slippage_exceeded, mint_amount >= min_lp_amount);
+  pool::liquidity_supply += mint_amount;
+
+  ;; Update balances
+  pool::balances = store_balances.tuple::pack_grams();
+  pool::admin_balances = store_admin_balances.tuple::pack_grams();
+
+  return mint_amount;
+}
+
+;; Calculate x[j] if one makes x[i] = x
+;; Done by solving quadratic equation iteratively.
+;;  x_1**2 + x1 * (sum' - (A*n**n - 1) * D / (A * n**n)) = D ** (n + 1) / (n ** (2 * n) * prod' * A)
+;;  x_1**2 + b*x_1 = c
+;;  x_1 = (x_1**2 + c) / (2*x_1 + b)
+;; @param x in the input is converted to the same price/precision
+int get_y(int i, int j, int x, tuple xp) impure inline {
+  throw_unless(err::same_coin, i != j);
+  ;; should be unreachable, but good for safety
+  throw_unless(5, (i >= 0) & (i < pool::n_coins));
+  throw_unless(5, (j >= 0) & (j < pool::n_coins));
+
+  int amp = _A();
+  int D = get_D(xp, amp);
+  int Ann = amp * pool::n_coins;
+  int c = D;
+
+  int S_ = 0;
+  int _x = 0;
+  int y_prev = 0;
+  int _i = 0;
+  repeat(pool::n_coins) {
+    if _i == i {
+      _x = x;
+    } elseif _i != j {
+      _x = xp.at(_i);
+    }
+    if _i != j {
+      S_ += _x;
+      c = c * D / (_x * pool::n_coins);
+    }
+    _i += 1;
+  }
+
+  ;; c = D ** (n + 1) / (n ** (2 * n) * prod' * A)
+  c = c * D * A_PRECISION / (Ann * pool::n_coins);
+  ;; b = sum' - (A*n**n - 1) * D / (A * n**n) = sum' + D / (A * n**n) - D
+  int b = S_ + D * A_PRECISION / Ann; ;; # - D: D will be subtracted after
+
+  ;; Solve for y by approximating: y**2 + b*y = c
+  int y_prev = 0;
+  int y = D;
+  int i = 0;
+  while (i < 256) {
+    y_prev = y;
+    y = (y * y + c) / (2 * y + b - D);
+    ;; Equality with the precision of 1
+    if y > y_prev {
+      if y - y_prev <= 1 {
+        return y;
+      }
+    } else {
+      if y_prev - y <= 1 {
+        return y;
+      }
+    }
+    i += 1;
+  }
+  throw(err::calculation_failure);
+  return y; ;; compiler require code have to return
+}
+
+;; @param dx and dy in c-units
+int get_dy(int i, int j, int dx) method_id {
+  pool::load_data();
+  tuple xp = _xp();
+  tuple precision_mul = _precision_mul();
+
+  int x = xp.at(i) + dx * precision_mul.at(i);
+  int y = get_y(i, j, x, xp);
+
+  ;; -1 just in case there were some rounding errors
+  int dy = xp.at(j) - y - 1;
+  int fee = pool::fee * dy / FEE_DENOMINATOR;
+  return (dy - fee) / precision_mul.at(j);
+}
+
+;; @notice Perform an exchange between two coins
+;; @param i Index value for the coin to send
+;; @param j Index value for the coin to receive
+;; @param dx Amount of `i` being exchanged
+;; @param min_dy Minimum amount to receive
+;; @return Actual amount received
+int exchange(int i, int j, int dx, int min_dy) impure inline {
+  throw_unless(err::not_initialized, pool::is_initialized?);
+  throw_if(err::killed, pool::is_killed?);
+
+  tuple store_balances = _balances();
+  tuple store_admin_balances = _admin_balances();
+
+  tuple xp = _xp_mem(store_balances);
+  tuple precision_mul = _precision_mul();
+
+  int x = xp.at(i) + dx * precision_mul.at(i);
+  int y = get_y(i, j, x, xp);
+
+  ;; -1 just in case there were some rounding errors
+  int dy = xp.at(j) - y - 1;
+  int dy_fee = pool::fee * dy / FEE_DENOMINATOR;
+
+  ;; Convert all to real units
+  dy = (dy - dy_fee) / precision_mul.at(j);
+  throw_unless(err::slippage_exceeded, dy >= min_dy);
+
+  int dy_admin_fee = dy_fee * pool::admin_fee / FEE_DENOMINATOR;
+  dy_admin_fee = dy_admin_fee / precision_mul.at(j);
+
+  ;; Change balances exactly in same way as we change actual coin amounts
+  store_balances~tset(i, store_balances.at(i) + dx);
+  ;; When rounding errors happen, we undercharge admin fee in favor of LP
+  store_balances~tset(j, store_balances.at(j) - dy - dy_admin_fee);
+  ;; Append admin fee
+  store_admin_balances~tset(j, store_admin_balances.at(j) + dy_admin_fee);
+
+  ;; Update balances
+  pool::balances = store_balances.tuple::pack_grams();
+  pool::admin_balances = store_admin_balances.tuple::pack_grams();
+
+  return dy;
+}
+
+;; @notice Withdraw coins from the pool
+;; @dev Withdrawal amounts are based on current deposit ratios
+;; @param lp_amount Quantity of LP tokens to burn in the withdrawal
+;; @param min_amounts Minimum amounts of tokens to receive
+;; @return List of amounts of coins that were withdrawn
+tuple remove_liquidity(int lp_amount, tuple min_amounts) impure inline {
+  throw_unless(err::not_initialized, pool::is_initialized?);
+
+  int total_supply = pool::liquidity_supply;
+  tuple out_amounts = empty_tuple();
+  out_amounts~tuple::set_len(pool::n_coins, 0);
+  tuple store_balances = _balances();
+
+  int idx = 0;
+  repeat(pool::n_coins) {
+    int balance = store_balances.at(idx);
+    int value = balance * lp_amount / total_supply;
+    throw_unless(err::slippage_exceeded, value >= min_amounts.at(idx));
+    store_balances~tset(idx, balance - value);
+    out_amounts~tset(idx, value);
+    idx += 1;
+  }
+
+  pool::liquidity_supply -= lp_amount;
+  ;; Update balances
+  pool::balances = store_balances.tuple::pack_grams();
+
+  return out_amounts;
+}
+
+;; @notice Withdraw coins from the pool in an imbalanced amount
+;; @param amounts Amounts of tokens to withdraw
+;; @param max_burn_lp Maximum amount of LP token to burn in the withdrawal
+;; @return Actual amount of the LP token burned in the withdrawal
+int remove_liquidity_imbalance(tuple amounts, int max_burn_lp) impure inline {
+  throw_unless(err::not_initialized, pool::is_initialized?);
+  throw_if(err::killed, pool::is_killed?);
+
+  int amp = _A();
+  int token_supply = pool::liquidity_supply;
+  throw_unless(err::zero_liquidity_supply, token_supply > 0);
+  int fee = pool::fee * pool::n_coins / (4 * (pool::n_coins - 1));
+
+  tuple old_balances = _balances();
+  tuple store_balances = old_balances;
+  tuple store_admin_balances = _admin_balances();
+
+  tuple new_balances = old_balances;
+  int D0 = get_D_mem(old_balances, amp);
+
+  int idx = 0;
+  repeat(pool::n_coins) {
+    int new_balance = new_balances.at(idx) - amounts.at(idx);
+    throw_unless(err::exceed_reserve, new_balance >= 0);
+    new_balances~tset(idx, new_balance);
+    idx += 1;
+  }
+  int D1 = get_D_mem(new_balances, amp);
+
+  idx = 0;
+  repeat(pool::n_coins) {
+    int ideal_balance = D1 * old_balances.at(idx) / D0;
+    int new_balance = new_balances.at(idx);
+    int difference = ideal_balance > new_balance
+      ? ideal_balance - new_balance
+      : new_balance - ideal_balance;
+    int _fee = fee * difference / FEE_DENOMINATOR;
+    int admin_fee = _fee * pool::admin_fee / FEE_DENOMINATOR;
+
+    throw_unless(err::exceed_reserve, (new_balance - _fee) >= 0);
+    store_admin_balances~tset(idx, store_admin_balances.at(idx) + admin_fee);
+    store_balances~tset(idx, new_balance - admin_fee);
+    new_balances~tset(idx, new_balance - _fee);
+    idx += 1;
+  }
+  int D2 = get_D_mem(new_balances, amp);
+
+  int token_amount = (D0 - D2) * token_supply / D0;
+  throw_unless(err::zero_liquidity_burned, token_amount > 0);
+  token_amount += 1; ;; In case of rounding errors - make it unfavorable for the "attacker"
+  throw_unless(err::slippage_exceeded, token_amount <= max_burn_lp);
+  pool::liquidity_supply -= token_amount;
+
+  ;; Update balances
+  pool::balances = store_balances.tuple::pack_grams();
+  pool::admin_balances = store_admin_balances.tuple::pack_grams();
+
+  return token_amount;
+}
+
+;; Calculate x[i] if one reduces D from being calculated for xp to D
+;; Done by solving quadratic equation iteratively.
+;; x_1**2 + x1 * (sum' - (A*n**n - 1) * D / (A * n**n)) = D ** (n + 1) / (n ** (2 * n) * prod' * A)
+;; x_1**2 + b*x_1 = c
+;; x_1 = (x_1**2 + c) / (2*x_1 + b)
+;; @param x in the input is converted to the same price/precision
+int get_y_D(int A_, int i, tuple xp, int D) impure inline {
+  int Ann = A_ * pool::n_coins;
+  int c = D;
+
+  int S_ = 0;
+  int _i = 0;
+  repeat(pool::n_coins) {
+    if _i != i {
+      int _x = xp.at(i);
+      S_ += _x;
+      c = c * D / (_x * pool::n_coins);
+    }
+    _i += 1;
+  }
+  ;; c = D ** (n + 1) / (n ** (2 * n) * prod' * A)
+  c = c * D * A_PRECISION / (Ann * pool::n_coins);
+  ;; b = sum' - (A*n**n - 1) * D / (A * n**n) = sum' + D / (A * n**n) - D
+  int b = S_ + D * A_PRECISION / Ann; ;; # - D: D will be subtracted after
+
+  ;; Solve for y by approximating: y**2 + b*y = c
+  int y_prev = 0;
+  int y = D;
+  int i = 0;
+  while (i < 256) {
+    y_prev = y;
+    y = (y * y + c) / (2 * y + b - D);
+    ;; Equality with the precision of 1
+    if y > y_prev {
+      if y - y_prev <= 1 {
+        return y;
+      }
+    } else {
+      if y_prev - y <= 1 {
+        return y;
+      }
+    }
+    i += 1;
+  }
+  return y;
+}
+
+(int, int) _calc_withdraw_one_coin(int token_amount, int i) {
+  ;; First, need to calculate
+  ;;  * Get current D
+  ;;  * Solve Eqn against y_i for D - _token_amount
+  int amp = _A();
+  int fee = pool::fee * pool::n_coins / (4 * (pool::n_coins - 1));
+  tuple precision_mul = _precision_mul();
+  int total_supply = pool::liquidity_supply;
+
+  tuple xp = _xp();
+
+  int D0 = get_D(xp, amp);
+  int D1 = D0 - token_amount * D0 / total_supply;
+  tuple xp_reduced = xp;
+
+  int new_y = get_y_D(amp, i, xp, D1);
+  int dy_0 = (xp.at(i) - new_y) / precision_mul.at(i); ;; # w/o fees
+
+  int j = 0;
+  repeat(pool::n_coins) {
+    int dx_expected = j == i
+      ? (xp.at(j) * D1 / D0 - new_y)
+      : (xp.at(j) - xp.at(j) *  D1 / D0);
+    xp_reduced~tset(j, xp_reduced.at(j) - (fee * dx_expected / FEE_DENOMINATOR));
+    j += 1;
+  }
+
+  int dy = xp_reduced.at(i) - get_y_D(amp, i, xp_reduced, D1);
+  dy = (dy - 1) / precision_mul.at(i); ;; Withdraw less to account for rounding errors
+
+  return (dy, dy_0 - dy);
+}
+
+;; @notice Calculate the amount received when withdrawing a single coin
+;; @param token_amount Amount of LP tokens to burn in the withdrawal
+;; @param i Index value of the coin to withdraw
+;; @return Amount of coin received
+int calc_withdraw_one_coin(int token_amount, int i) method_id {
+  pool::load_data();
+  var (amount_out, _) = _calc_withdraw_one_coin(token_amount, i);
+  return amount_out;
+}
+
+;; @notice Withdraw a single coin from the pool
+;; @param token_amount Amount of LP tokens to burn in the withdrawal
+;; @param i Index value of the coin to withdraw
+;; @param min_amount Minimum amount of coin to receive
+;; @return Amount of coin received
+int remove_liquidity_one_coin(int token_amount, int i, int min_amount) impure inline {
+  throw_unless(err::not_initialized, pool::is_initialized?);
+  throw_if(err::killed, pool::is_killed?);
+
+  var (dy, dy_fee) = _calc_withdraw_one_coin(token_amount, i);
+  throw_unless(err::slippage_exceeded, dy >= min_amount);
+
+  tuple store_balances = _balances();
+  tuple store_admin_balances = _admin_balances();
+  int admin_fee = dy_fee * pool::admin_fee / FEE_DENOMINATOR;
+
+  store_admin_balances~tset(i, store_admin_balances.at(i) + admin_fee);
+  store_balances~tset(i, store_balances.at(i) - (dy + admin_fee));
+
+  pool::liquidity_supply -= token_amount;
+
+  ;; Update balances
+  pool::balances = store_balances.tuple::pack_grams();
+  pool::admin_balances = store_admin_balances.tuple::pack_grams();
+
+  return dy;
+}
+
+() ramp_A(int future_A, int future_time) impure inline {
+  throw_unless(err::during_ramp, now() >= pool::initial_A_time + MIN_RAMP_TIME);
+  throw_unless(err::insufficient_time, future_time >= now() + MIN_RAMP_TIME);
+
+  int initial_A = _A();
+  int future_A_p = future_A * A_PRECISION;
+
+  throw_unless(err::amp_out_of_range, (future_A > 0) & (future_A < MAX_AMP));
+  if future_A_p < initial_A {
+    throw_unless(err::future_amp_too_low, future_A_p * MAX_AMP_CHANGE >= initial_A);
+  } else {
+    throw_unless(err::future_amp_too_high, future_A_p <= initial_A * MAX_AMP_CHANGE);
+  }
+
+  pool::initial_A = initial_A;
+  pool::future_A = future_A_p;
+  pool::initial_A_time = now();
+  pool::future_A_time = future_time;
+}
+
+() stop_ramp_A() impure inline {
+  int current_A = _A();
+  pool::initial_A = current_A;
+  pool::future_A = current_A;
+  pool::initial_A_time = now();
+  pool::future_A_time = now();
+}
+
+() commit_new_fee(int new_fee, int new_admin_fee) impure inline {
+  throw_unless(err::active_action, pool::admin_actions_deadline == 0);
+  throw_unless(err::fee_exceeded_maximum, pool::future_fee <= MAX_FEE);
+  throw_unless(err::admin_fee_exceeded_maximum, pool::future_admin_fee <= MAX_ADMIN_FEE);
+
+  pool::admin_actions_deadline = now() + ADMIN_ACTIONS_DELAY;
+  pool::future_fee = new_fee;
+  pool::future_admin_fee = new_admin_fee;
+}
+
+() apply_new_fee() impure inline {
+  throw_unless(err::insufficient_time, now() >= pool::admin_actions_deadline);
+  throw_unless(err::no_active_action, pool::admin_actions_deadline != 0);
+
+  pool::admin_actions_deadline = 0;
+  pool::fee = pool::future_fee;
+  pool::admin_fee = pool::future_admin_fee;
+
+  pool::future_fee = 0;
+  pool::future_admin_fee = 0;
+}
+
+() revert_new_parameters() impure inline {
+  pool::admin_actions_deadline = 0;
+  pool::future_fee = 0;
+  pool::future_admin_fee = 0;
+}
+
+() commit_transfer_ownership(slice new_admin) impure inline {
+  throw_unless(err::active_action, pool::transfer_admin_deadline == 0);
+
+  pool::transfer_admin_deadline = now() + ADMIN_ACTIONS_DELAY;
+  pool::future_admin = new_admin;
+}
+
+() apply_transfer_ownership() impure inline {
+  throw_unless(err::insufficient_time, now() >= pool::admin_actions_deadline);
+  throw_unless(err::no_active_action, pool::transfer_admin_deadline != 0);
+
+  pool::transfer_admin_deadline = 0;
+  pool::admin = pool::future_admin;
+  pool::future_admin = none_address();
+}
+
+() revert_transfer_ownership() impure inline {
+  pool::transfer_admin_deadline = 0;
+  pool::future_admin = none_address();
+}
+
+() kill_me() impure inline {
+  pool::is_killed? = true;
+}
+
+() unkill_me() impure inline {
+  pool::is_killed? = false;
+}
