@@ -3,6 +3,7 @@
 #include "../lib/tuple.fc";
 #include "../lib/common.fc";
 #include "../lib/utils.fc";
+#include "../gas/fee_buffer.fc";
 #include "buffer_op.fc";
 
 global slice buffer::pool;
@@ -70,12 +71,10 @@ global cell buffer::balances;
   buffer_add_liquidity query_id:uint64 min_lp:(VarUInteger 16) c_amounts:(Maybe ^Cell) = InternalMsgBody;
 -}
 () buffer_add_liquidity(slice sender, slice body) impure inline {
-  {-
   int fee = fee::buffer_add_liquidity();
   int msg_val = get_incoming_value().pair_first();
   ;; ensure enough TON to execute transactions
   throw_unless(err::insufficient_fee, msg_val >= fee);
-  -}
 
   int query_id = body~load_uint(64);
   int min_lp = body~load_coins();
@@ -125,12 +124,10 @@ global cell buffer::balances;
   buffer_refund_me query_id:uint64 = InternalMsgBody;
 -}
 () buffer_refund_me(slice sender, slice body) impure inline {
-  {-
   int fee = fee::buffer_refund_me();
   int msg_val = get_incoming_value().pair_first();
   ;; ensure enough TON to execute transactions
-  throw_unless(err::insufficient_fee, msg_val > fee);
-  -}
+  throw_unless(err::insufficient_fee, msg_val >= fee);
 
   int query_id = body~load_uint(64);
 

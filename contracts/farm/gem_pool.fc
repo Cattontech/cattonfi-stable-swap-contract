@@ -1,0 +1,375 @@
+#pragma version >=0.4.4;
+#include "../lib/stdlib.fc";
+#include "../lib/common.fc";
+#include "../lib/utils.fc";
+#include "../plain_pool/pool_op.fc";
+#include "../gas/fee_gem_pool.fc";
+#include "gem_buffer_utils.fc";
+#include "gem_op.fc";
+
+global int pool::serial;
+global slice pool::admin;
+global slice pool::coin;
+global slice pool::wallet;
+
+global int pool::liquidity_supply;
+global int pool::reward_per_second;
+global int pool::acc_reward_per_share;
+global int pool::last_reward_time;
+
+global int pool::boosted_reward_per_second;
+global int pool::boosted_reward_end_time;
+
+global cell pool::buffer_code;
+
+() pool::load_data() impure {
+  slice ds = get_data().begin_parse();
+  pool::serial = ds~load_uint(32);
+  pool::admin = ds~load_msg_addr();
+  pool::coin = ds~load_msg_addr();
+  pool::wallet = ds~load_msg_addr();
+
+  cell pool_state = ds~load_ref();
+  pool::buffer_code = ds~load_ref();
+
+  ;; pool_state
+  ds = pool_state.begin_parse();
+  pool::liquidity_supply = ds~load_coins();
+  pool::reward_per_second = ds~load_coins();
+  pool::acc_reward_per_share = ds~load_uint(256);
+  pool::last_reward_time = ds~load_uint(64);
+
+  pool::boosted_reward_per_second = ds~load_coins();
+  pool::boosted_reward_end_time = ds~load_uint(64);
+}
+
+() pool::save_data() impure inline_ref {
+  set_data(begin_cell()
+    .store_uint(pool::serial, 32) ;; 32 bit
+    .store_slice(pool::admin) ;; 267 bit
+    .store_slice(pool::coin) ;; 267 bit
+    .store_slice(pool::wallet) ;; 267 bit
+    .store_ref(begin_cell()
+      .store_coins(pool::liquidity_supply) ;; max 124 bit
+      .store_coins(pool::reward_per_second) ;; max 124 bit
+      .store_uint(pool::acc_reward_per_share, 256) ;; 256 bit
+      .store_uint(pool::last_reward_time, 64) ;; 64 bit
+
+      .store_coins(pool::boosted_reward_per_second) ;; max 124 bit
+      .store_uint(pool::boosted_reward_end_time, 64) ;; 64 bit
+      .end_cell())
+    .store_ref(pool::buffer_code)
+    .end_cell()
+  );
+}
+
+int _boosted_reward(int timestamp) inline {
+  int boosted_time = timestamp <= pool::boosted_reward_end_time ? timestamp : pool::boosted_reward_end_time;
+  int duration = boosted_time > pool::last_reward_time ? boosted_time - pool::last_reward_time : 0;
+  return duration * pool::boosted_reward_per_second;
+}
+
+() update() impure inline {
+  int timestamp = now();
+  if timestamp > pool::last_reward_time {
+    if (pool::liquidity_supply != 0) {
+      int time = timestamp - pool::last_reward_time;
+      int reward = time * pool::reward_per_second;
+      int boosted = _boosted_reward(timestamp);
+      pool::acc_reward_per_share += (((reward + boosted) * ACC_REWARD_PRECISION) / pool::liquidity_supply);
+    }
+    pool::last_reward_time = timestamp;
+  }
+}
+
+{-
+  gem_pool_earn query_id:uint64 amount:(VarUInteger 16) uid:uint64
+    owner:MsgAddress return_excess:MsgAddress = InternalMsgBody;
+-}
+() gem_pool_earn(slice sender, slice body) impure inline {
+  int query_id = body~load_uint(64);
+  int amount = body~load_coins();
+  int uid = body~load_uint(64);
+  slice owner = body~load_msg_addr();
+  slice return_excess = body~load_msg_addr();
+
+  throw_unless(err::access_denied, equal_slices(sender, my_address()));
+  send_excesses(return_excess, 0, msg::remaining_value + msg::ignore_errors);
+  throw(0); ;; exit without saving data
+}
+
+;; gem_pool_stake recipient:MsgAddress return_excess:MsgAddress = InternalMsgBody;
+() gem_pool_stake(slice sender, int amount, int query_id, slice body) impure inline {
+  int fee = fee::gem_pool_stake();
+  int msg_val = get_incoming_value().pair_first();
+  ;; ensure enough TON to execute transactions
+  throw_unless(err::insufficient_fee, msg_val >= fee);
+
+  slice recipient = body~load_msg_addr();
+  slice return_excess = body~load_msg_addr();
+
+  update();
+  pool::liquidity_supply += amount;
+  var (gem_buffer, state_init, _) = calc_gem_buffer_address(my_address(), recipient, pool::buffer_code);
+
+  builder gem_buffer_stake = begin_cell()
+    .store_uint(op::gem_buffer_stake, 32)
+    .store_uint(query_id, 64)
+    .store_coins(amount)
+    .store_coins(0) ;; pending_reward
+    .store_uint(pool::acc_reward_per_share, 256)
+    .store_slice(return_excess);
+  send_msg(false, gem_buffer, state_init, gem_buffer_stake, 0, msg::remaining_value);
+}
+
+{-
+  unstake_data$_ staked_amount:(VarUInteger 16) reward_debt:uint256
+    pending_reward:(VarUInteger 16) gem_buffer_balance:(VarUInteger 16)
+    unstake_amount:(VarUInteger 16) take_lp:Bool = UnstakeData;
+
+  gem_pool_unstake query_id:uint64
+    owner:MsgAddress to:MsgAddress return_excess:MsgAddress uid:uint64
+    unstake_data:^UnstakeData = InternalMsgBody;
+-}
+() gem_pool_unstake(slice sender, slice body) impure inline {
+  int query_id = body~load_uint(64);
+  slice owner = body~load_msg_addr();
+  slice to = body~load_msg_addr();
+  slice return_excess = body~load_msg_addr();
+  int uid = body~load_uint(64);
+  slice body = body~load_ref().begin_parse();
+
+  ;; unstake_data
+  int staked_amount = body~load_coins();
+  int reward_debt = body~load_uint(256);
+  int pending_reward = body~load_coins();
+  int gem_buffer_balance = body~load_coins();
+  int unstake_amount = body~load_coins();
+  int take_lp = body~load_int(1);
+
+  var (gem_buffer, state_init, _) = calc_gem_buffer_address(my_address(), owner, pool::buffer_code);
+  throw_unless(err::access_denied, equal_slices(sender, gem_buffer.to_slice()));
+
+  update();
+  if staked_amount > 0 {
+    pending_reward += (((staked_amount * pool::acc_reward_per_share) / ACC_REWARD_PRECISION) - reward_debt);
+  }
+
+  raw_reserve(0, reserve::add_original_balance);
+  if uid > 0 {
+    ;; int send_val = get_compute_fee(1000000, false); ;; 1 TON when gas price is 1000
+    int send_val = get_compute_fee(gas::gem_pool_earn, false);
+    ;; send earn reward (send to this contract to save log)
+    builder gem_pool_earn = begin_cell()
+      .store_uint(op::gem_pool_earn, 32)
+      .store_uint(query_id, 64)
+      .store_coins(pending_reward)
+      .store_uint(uid, 64)
+      .store_slice(owner)
+      .store_slice(return_excess);
+    send_msg(false, my_address().to_builder(), null(), gem_pool_earn, send_val, msg::pay_gas_separately);
+    pending_reward = 0;
+  }
+
+  int restake_amount = staked_amount - unstake_amount;
+  if (restake_amount > 0) | (pending_reward > 0) {
+    int send_val = gem_buffer_balance
+    ;; + get_compute_fee(1000000, false); ;; 1 TON when gas price is 1000
+      + get_compute_fee(gas::gem_buffer_stake, false);
+
+    ;; restake remaining token for user
+    builder gem_buffer_stake = begin_cell()
+      .store_uint(op::gem_buffer_stake, 32)
+      .store_uint(query_id, 64)
+      .store_coins(restake_amount)
+      .store_coins(pending_reward)
+      .store_uint(pool::acc_reward_per_share, 256)
+      .store_slice(return_excess);
+    send_msg(false, gem_buffer, state_init, gem_buffer_stake, send_val, msg::pay_gas_separately);
+  }
+
+  ;; send unstake token to user
+  pool::liquidity_supply -= unstake_amount;
+
+  if (unstake_amount > 0) {
+    if take_lp {
+      ;; user unstake to receive LP
+      send_token(pool::wallet.to_builder(), to, return_excess, query_id, unstake_amount, 0, op::gem_pool_unstake, msg::unreserved_balance);
+    } else {
+      ;; user unstake to receive tokens -> burn LP
+      builder burn = begin_cell()
+        .store_uint(op::burn, 32)
+        .store_uint(query_id, 64)
+        .store_coins(unstake_amount)
+        .store_slice(return_excess)
+        .store_maybe_ref(begin_cell()
+          .store_uint(op::pool_remove_liquidity, 32)
+          .store_slice(to) ;; recipient
+          .store_maybe_ref(null()) ;; c_min_amounts
+          .end_cell());
+      send_msg(false, pool::wallet.to_builder(), null(), burn, 0, msg::unreserved_balance);
+    }
+  } else {
+    send_excesses(return_excess, 0, msg::unreserved_balance + msg::ignore_errors);
+  }
+}
+
+{-
+  gem_pool_init query_id:uint64 wallet:MsgAddress
+    reward_per_second:(VarUInteger 16)
+    boosted_reward_per_second:(VarUInteger 16)
+    boosted_reward_end_time:uint64 = InternalMsgBody;
+-}
+() gem_pool_init(slice sender, slice body) impure inline {
+  int query_id = body~load_uint(64);
+  slice wallet = body~load_msg_addr();
+  int reward_per_second = body~load_coins();
+  int boosted_reward_per_second = body~load_coins();
+  int boosted_reward_end_time = body~load_uint(64);
+
+  throw_unless(err::access_denied, equal_slices(sender, pool::admin));
+  throw_unless(err::initialized, pool::wallet.addr_none?());
+  throw_if(err::invalid_token, wallet.addr_none?());
+
+  pool::wallet = wallet;
+  pool::liquidity_supply = 0;
+  pool::reward_per_second = reward_per_second;
+  pool::acc_reward_per_share = 0;
+  pool::last_reward_time = now();
+
+  pool::boosted_reward_per_second = boosted_reward_per_second;
+  pool::boosted_reward_end_time = boosted_reward_end_time;
+}
+
+{-
+  gem_pool_change_reward query_id:uint64
+    reward_per_second:(VarUInteger 16)
+    boosted_reward_per_second:(VarUInteger 16)
+    boosted_reward_end_time:uint64 = InternalMsgBody;
+-}
+() gem_pool_change_reward(slice sender, slice body) impure inline {
+  int query_id = body~load_uint(64);
+  int reward_per_second = body~load_coins();
+  int boosted_reward_per_second = body~load_coins();
+  int boosted_reward_end_time = body~load_uint(64);
+
+  throw_unless(err::access_denied, equal_slices(sender, pool::admin));
+  throw_if(err::not_initialized, pool::wallet.addr_none?());
+
+  update();
+  pool::reward_per_second = reward_per_second;
+  pool::boosted_reward_per_second = boosted_reward_per_second;
+  pool::boosted_reward_end_time = boosted_reward_end_time;
+  send_excesses(sender, 0, msg::remaining_value + msg::ignore_errors);
+}
+
+() gem_pool_transfer_notification(slice pool_wallet, slice body) impure {
+  ;; transfer_notification query_id:uint64 amount:(VarUInteger 16)
+  ;;   sender:MsgAddress forward_payload:(Either Cell ^Cell) = InternalMsgBody;
+  int query_id = body~load_uint(64);
+  int amount = body~load_coins();
+  slice sender = body~load_msg_addr();
+  throw_if(err::zero_amount, amount == 0); ;; transfer zero amount
+
+  ;; Standard `forward_payload:(Either Cell ^Cell)`
+  ;; We use forward_payload:(Maybe ^Cell)
+  body = body~load_maybe_ref().begin_parse();
+  throw_if(0, body.slice_empty?()); ;; noPayload
+
+  int op = body~load_uint(32);
+  throw_unless(err::invalid_token, equal_slices(pool::wallet, pool_wallet));
+
+  try {
+    if op == op::gem_pool_stake {
+      return gem_pool_stake(sender, amount, query_id, body);
+    }
+  } catch (_, error_code) {
+    ;; refund tokens if action fails
+    send_token(pool_wallet.to_builder(), sender, sender, query_id, amount, 0, error_code, msg::remaining_value + msg::ignore_errors);
+    throw(0);
+  }
+
+  throw(err::invalid_op);
+}
+
+() on_bounce(slice body) impure {
+  body~skip_bits(32);
+  int op = body~load_uint(32);
+  body~skip_bits(64); ;; query_id
+  throw(0);
+}
+
+() route_internal_message(int flags, slice sender, slice body) impure inline {
+  if flags & 1 {
+    return on_bounce(body);
+  }
+
+  int op = body~load_uint(32);
+
+  ;; receive from `jetton_wallet`
+  if op == op::transfer_notification {
+    return gem_pool_transfer_notification(sender, body);
+  }
+  ;; receive from `self`
+  if op == op::gem_pool_earn {
+    return gem_pool_earn(sender, body);
+  }
+  ;; receive from `gem_buffer`
+  if op == op::gem_pool_unstake {
+    return gem_pool_unstake(sender, body);
+  }
+  ;; receive from `admin`
+  if op == op::gem_pool_init {
+    return gem_pool_init(sender, body);
+  }
+  ;; receive from `admin`
+  if op == op::gem_pool_change_reward {
+    return gem_pool_change_reward(sender, body);
+  }
+
+  ;; top up TON balance
+  if op == op::top_up {
+    throw(0); ;; do nothing
+  }
+
+  throw(err::invalid_op);
+}
+
+() recv_internal(cell in_msg_full, slice in_msg_body) impure {
+  ;; ~strdump("pool:get_storage_fees"); ~dump(get_storage_fees());
+  slice cs = in_msg_full.begin_parse();
+  int flags = cs~load_uint(4);
+  slice sender = cs~load_msg_addr();
+
+  pool::load_data();
+  route_internal_message(flags, sender, in_msg_body);
+  pool::save_data();
+}
+
+slice get_gem_buffer_address(slice owner) method_id {
+  pool::load_data();
+  var (gem_buffer, _, _) = calc_gem_buffer_address(my_address(), owner, pool::buffer_code);
+  return gem_buffer.to_slice();
+}
+
+(
+  int, slice, slice, slice,
+  int, int, int, int,
+  int, int
+) get_gem_pool_data() method_id {
+  pool::load_data();
+  return (
+    pool::serial,
+    pool::admin,
+    pool::coin,
+    pool::wallet,
+
+    pool::liquidity_supply,
+    pool::reward_per_second,
+    pool::acc_reward_per_share,
+    pool::last_reward_time,
+    
+    pool::boosted_reward_per_second,
+    pool::boosted_reward_end_time
+  );
+}

@@ -1,0 +1,19 @@
+#pragma version >=0.4.4;
+#include "../lib/stdlib.fc";
+#include "export/gem_buffer.fc";
+
+;; 1 year in seconds
+const int GEM_BUFFER_STORE_DURATION = 60 * 60 * 24 * 365 * 1;
+
+int fee::store_gem_buffer() {
+  int cells = 0
+    + 1 ;;ref_init_data
+    + gem_buffer_code::cells; ;;ref_init_code
+  int bits = 0
+    + 267 ;;pool
+    + 267 ;;owner
+    + 124 ;;amount (max)
+    + 256 ;;reward_debt (max)
+    + gem_buffer_code::bits;
+  return get_storage_fee(cells, bits, GEM_BUFFER_STORE_DURATION, false);
+}

@@ -1,4 +1,50 @@
 #pragma version >=0.4.4;
 #include "../lib/stdlib.fc";
+#include "export/buffer.fc";
 #include "export/plain_pool.fc";
-;; #include "store_pool.fc";
+#include "forward/buffer.fc";
+#include "forward/plain_pool.fc";
+#include "store_liquidity.fc";
+
+int fee::pool_add_liquidity() {
+  int storage_fee = fee::store_liquidity();
+  int compute_gas = 0
+    + gas::pool_add_liquidity
+    + gas::internal_transfer;
+  int compute_fee = get_compute_fee(compute_gas, false);
+  int fwd_fee = get_forward_fee(fwd::mint_liquidity::cells, fwd::mint_liquidity::bits, false);
+  return storage_fee + compute_fee + fwd_fee;
+}
+
+int fee::pool_provide_lp(int min_lp, int is_ton?) {
+  ;; buffer token only
+  int compute_gas = 0
+    + (is_ton? ? gas::pool_provide_lp_ton : gas::pool_provide_lp)
+    + gas::buffer_token;
+  int compute_fee = get_compute_fee(compute_gas, false);
+  int fwd_fee = get_forward_fee(fwd::buffer_token::cells, fwd::buffer_token::bits, false);
+  int fee = compute_fee + fwd_fee;
+
+  if min_lp {
+    ;; add liquidity
+    fee += get_forward_fee(fwd::buffer_add_liquidity_notification::cells,
+      fwd::buffer_add_liquidity_notification::bits, false);
+    fee += fee::pool_add_liquidity();
+  }
+  return fee;
+}
+
+int fee::pool_exchange(int is_ton?) {
+  int compute_gas = 0
+    + (is_ton? ? gas::pool_exchange_ton : gas::pool_exchange);
+  int compute_fee = get_compute_fee(compute_gas, false);
+  int fwd_fee = get_forward_fee(fwd::send_token::cells, fwd::send_token::bits, false);
+  return compute_fee + fwd_fee;
+}
+
+int fee::pool_remove_liquidity_one_coin() {
+  int compute_gas = gas::pool_remove_liquidity_one_coin;
+  int compute_fee = get_compute_fee(compute_gas, false);
+  int fwd_fee = get_forward_fee(fwd::send_token::cells, fwd::send_token::bits, false);
+  return compute_fee + fwd_fee;
+}

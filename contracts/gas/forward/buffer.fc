@@ -1,0 +1,48 @@
+#pragma version >=0.4.4;
+#include "../export/buffer.fc";
+
+;; -----------------------------------------------------------------------
+;; Buffer
+;; -----------------------------------------------------------------------
+;; forward buffer_token
+;; -----------------------------------------------------------------------
+const int fwd::buffer_token::cells = 0
+  + 1 ;;ref_init_data
+  + buffer_code::cells ;;ref_init_code
+  + 1 ;;ref_body
+  + 1; ;;ref_c_amounts
+const int fwd::buffer_token::bits = 0
+  + 267 ;;pool (state_init_data)
+  + 267 ;;owner (state_init_data)
+  + 1 ;;balances (state_init_data)
+  + buffer_code::bits ;;(state_init_code)
+
+  + 32 ;;op (body)
+  + 64 ;;query_id (body)
+  + 124 ;;min_lp (body) (max)
+  + 1 + 1023; ;;c_amounts (body) (max)
+
+;; -----------------------------------------------------------------------
+;; forward buffer_add_liquidity_notification
+;; -----------------------------------------------------------------------
+const int fwd::buffer_add_liquidity_notification::cells = 0
+  + 1 ;;ref_body
+  + 1; ;;ref_c_amounts
+const int fwd::buffer_add_liquidity_notification::bits = 0
+  + 32 ;;op (body)
+  + 64 ;;query_id (body)
+  + 267 ;;owner (body)
+  + 124 ;;min_lp (body) (max)
+  + 1 + 1023; ;;c_amounts (body) (max)
+
+;; -----------------------------------------------------------------------
+;; forward buffer_refund_me_notification
+;; -----------------------------------------------------------------------
+const int fwd::buffer_refund_me_notification::cells = 0
+  + 1 ;;ref_body
+  + 1; ;;ref_c_amounts
+const int fwd::buffer_refund_me_notification::bits = 0
+  + 32 ;;op (body)
+  + 64 ;;query_id (body)
+  + 267 ;;owner (body)
+  + 1 + 1023; ;;c_amounts (body) (max)

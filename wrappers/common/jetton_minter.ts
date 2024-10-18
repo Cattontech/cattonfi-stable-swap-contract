@@ -17,7 +17,7 @@ export class JettonMinter extends BaseContract {
     let res = await provider.get('get_jetton_data', [])
     let total_supply = res.stack.readBigNumber()
     let mintable = res.stack.readBoolean()
-    let admin_address = res.stack.readAddress()
+    let admin_address = res.stack.readAddressOpt()
     let jetton_content = res.stack.readCell()
     let jetton_wallet_code = res.stack.readCell()
     return {

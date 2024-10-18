@@ -1,6 +1,6 @@
 {
   "name": "@catton/stable-swap",
-  "version": "2.0.1",
+  "version": "2.1.0",
   "main": "dist/index.js",
   "files": [
     "dist/**/*"
@@ -8,12 +8,15 @@
   "scripts": {
     "help": "blueprint help",
     "create": "blueprint create",
-    "start": "blueprint run",
+    "start": "blueprint run --tonconnect",
     "build": "blueprint build",
     "file": "ts-node",
     "test": "jest --verbose",
     "fift": "func-js --fift ./out.fift",
     "fift:help": "func-js --help",
+    "version:major": "npm version --no-git-tag-version major",
+    "version:minor": "npm version --no-git-tag-version minor",
+    "version:patch": "npm version --no-git-tag-version patch",
     "build:sdk": "rm -rf dist && tsc --project tsconfig.build.json",
     "prepublishOnly": "npm run build:sdk",
     "postpublish": "rm -rf dist"

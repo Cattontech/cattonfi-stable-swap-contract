@@ -1,0 +1,150 @@
+#pragma version >=0.4.4;
+#include "../lib/stdlib.fc";
+#include "../lib/common.fc";
+#include "../lib/utils.fc";
+#include "../gas/fee_gem_buffer.fc";
+#include "gem_op.fc";
+
+global slice buffer::pool;
+global slice buffer::owner;
+global int buffer::amount;
+global int buffer::reward_debt;
+global int buffer::pending_reward;
+
+() buffer::load_data() impure {
+  slice ds = get_data().begin_parse();
+  buffer::pool = ds~load_msg_addr();
+  buffer::owner = ds~load_msg_addr();
+
+  ds = ds~load_ref().begin_parse();
+  buffer::amount = ds~load_coins();
+  buffer::reward_debt = ds~load_uint(256);
+  buffer::pending_reward = ds~load_coins();
+}
+
+() buffer::save_data() impure inline_ref {
+  set_data(begin_cell()
+    .store_slice(buffer::pool)
+    .store_slice(buffer::owner)
+    .store_ref(begin_cell()
+      .store_coins(buffer::amount)
+      .store_uint(buffer::reward_debt, 256)
+      .store_coins(buffer::pending_reward)
+      .end_cell())
+    .end_cell()
+  );
+}
+
+{-
+  gem_buffer_stake query_id:uint64 amount:(VarUInteger 16) pending_reward:(VarUInteger 16)
+    acc_reward_per_share:uint256 return_excess:MsgAddress = InternalMsgBody;
+-}
+() gem_buffer_stake(slice sender, slice body) impure inline {
+  int query_id = body~load_uint(64);
+  int amount = body~load_coins();
+  int pending_reward = body~load_coins();
+  int acc_reward_per_share = body~load_uint(256);
+  slice return_excess = body~load_msg_addr();
+
+  throw_unless(err::access_denied, equal_slices(sender, buffer::pool));
+
+  if buffer::amount > 0 {
+    pending_reward += ((buffer::amount * acc_reward_per_share) / ACC_REWARD_PRECISION - buffer::reward_debt);
+  }
+
+  buffer::amount += amount;
+  buffer::reward_debt = (buffer::amount * acc_reward_per_share) / ACC_REWARD_PRECISION;
+  buffer::pending_reward += pending_reward;
+
+  raw_reserve(fee::store_gem_buffer(), reserve::at_most);
+  send_excesses(return_excess, 0, msg::unreserved_balance + msg::ignore_errors);
+}
+
+{-
+  gem_buffer_unstake query_id:uint64 to:MsgAddress return_excess:MsgAddress
+    unstake_amount:(VarUInteger 16) take_lp:Bool uid:uint64 = InternalMsgBody;
+-}
+() gem_buffer_unstake(slice sender, slice body) impure inline {
+  int query_id = body~load_uint(64);
+  slice to = body~load_msg_addr();
+  slice return_excess = body~load_msg_addr();
+  int unstake_amount = body~load_coins();
+  int take_lp = body~load_int(1);
+  int uid = body~load_uint(64);
+
+  throw_unless(err::access_denied, equal_slices(sender, buffer::owner));
+  throw_if(err::zero_amount, (buffer::amount == 0) & (buffer::pending_reward == 0));
+  throw_unless(err::insufficient_funds, unstake_amount <= buffer::amount);
+
+  int fee = 0;
+  if unstake_amount == 0 {
+    fee = fee::gem_buffer_claim_gem();
+  } else {
+    if take_lp == 0 {
+      fee = fee::gem_buffer_unstake_take_lp();
+    } else {
+      fee = fee::gem_buffer_unstake_take_tokens();
+    }
+  }
+  int msg_val = get_incoming_value().pair_first();
+  ;; ensure enough TON to execute transactions
+  throw_unless(err::insufficient_fee, msg_val > fee);
+
+  raw_reserve(0, reserve::exact);
+
+  int gem_buffer_balance = get_balance().pair_first() - msg_val; ;; subtracted storage_fee
+  builder gem_pool_unstake = begin_cell()
+    .store_uint(op::gem_pool_unstake, 32)
+    .store_uint(query_id, 64)
+    .store_slice(sender) ;; owner
+    .store_slice(to)
+    .store_slice(return_excess)
+    .store_uint(uid, 64)
+    .store_ref(begin_cell()
+      .store_coins(buffer::amount) ;; staked_amount
+      .store_uint(buffer::reward_debt, 256) ;; reward_debt
+      .store_coins(buffer::pending_reward) ;; pending_reward
+      .store_coins(gem_buffer_balance) ;; gem_buffer_balance
+      .store_coins(unstake_amount)
+      .store_int(take_lp, 1)
+      .end_cell());
+  send_msg(false, buffer::pool.to_builder(), null(), gem_pool_unstake, 0, msg::unreserved_balance + msg::destroy_if_zero);
+  buffer::amount = 0;
+  buffer::reward_debt = 0;
+  buffer::pending_reward = 0;
+}
+
+() route_internal_message(int flags, slice sender, slice body) impure inline {
+  if flags & 1 {
+    return ();
+  }
+
+  int op = body~load_uint(32);
+
+  ;; receive from `gem_pool`
+  if op == op::gem_buffer_stake {
+    return gem_buffer_stake(sender, body);
+  }
+  ;; receive from `user`
+  if op == op::gem_buffer_unstake {
+    return gem_buffer_unstake(sender, body);
+  }
+
+  throw(err::invalid_op);
+}
+
+() recv_internal(cell in_msg_full, slice in_msg_body) impure {
+  ;; ~strdump("buffer:get_storage_fees"); ~dump(get_storage_fees());
+  slice cs = in_msg_full.begin_parse();
+  int flags = cs~load_uint(4);
+  slice sender = cs~load_msg_addr();
+
+  buffer::load_data();
+  route_internal_message(flags, sender, in_msg_body);
+  buffer::save_data();
+}
+
+(slice, slice, int, int, int) get_user_data() method_id {
+  buffer::load_data();
+  return (buffer::pool, buffer::owner, buffer::amount, buffer::reward_debt, buffer::pending_reward);
+}

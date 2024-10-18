@@ -13,7 +13,7 @@ import {
   PlainPool,
   StableSwapFactory,
 } from '../wrappers'
-import {getCodes, getFactory} from '../scripts/utils'
+import {getStableSwapCodes, getFactory} from '../scripts/utils_stable_swap'
 import {FactoryRuntimeState} from './base/factory.init'
 import {exportComputeGas, isAbortLog, resetAbortLog, setAbortLog, StoreGasUsed, wrapSend} from './base/base.utils'
 import {generateTestCases} from './base/testcase'
@@ -31,7 +31,7 @@ describe('plain_pool', () => {
 
   async function exportGas() {
     const utils = await st.contractUtils()
-    const codes = await getCodes()
+    const codes = await getStableSwapCodes()
 
     const exports = [
       {
@@ -970,7 +970,7 @@ describe('plain_pool', () => {
         })
 
         it('pool_upgrade (successed)', async () => {
-          const {pool_code} = await getCodes()
+          const {pool_code} = await getStableSwapCodes()
           const body = PlainPool.msgUpgrade(pool_code)
 
           const msg_val = toNano('50')

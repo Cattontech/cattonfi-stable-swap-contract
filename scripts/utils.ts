@@ -1,7 +1,7 @@
 import fs = require('fs')
 import path = require('path')
-import {compile, NetworkProvider} from '@ton/blueprint'
-import {Address, Cell, Contract, OpenedContract} from '@ton/core'
+import {NetworkProvider} from '@ton/blueprint'
+import {Address, Contract, OpenedContract} from '@ton/core'
 
 /**
  * Rewrite fetch timeout for @tonconnect/sdk
@@ -47,38 +47,4 @@ export function saveDeployInfo(provider: NetworkProvider, contractName: string, 
   const folder = path.join(process.cwd(), 'deploy', provider.network())
   fs.mkdirSync(folder, {recursive: true})
   fs.writeFileSync(path.join(folder, `${contractName}.json`), JSON.stringify(content, null, 2))
-}
-
-let factory_code: Cell
-let pool_code: Cell
-let buffer_code: Cell
-let liquidity_code: Cell
-export async function getCodes() {
-  if (!factory_code || !pool_code || !buffer_code || !liquidity_code) {
-    factory_code = await compile('stable_swap_factory/factory')
-    pool_code = await compile('plain_pool/pool')
-    buffer_code = await compile('liquidity/buffer')
-    liquidity_code = await compile('liquidity/liquidity')
-  }
-  return {
-    factory_code,
-    pool_code,
-    buffer_code,
-    liquidity_code,
-  }
-}
-
-export async function getFactory(admin: Address) {
-  const {factory_code, buffer_code, liquidity_code, pool_code} = await getCodes()
-  const init_state = StableSwapFactory.packInitState({
-    admin: admin,
-    fee_recipient: admin,
-    plain_pool: {
-      admin_fee: parseFee(50),
-      pool_code,
-      buffer_code,
-      liquidity_code,
-    },
-  })
-  return new StableSwapFactory({code: factory_code, data: init_state})
 }

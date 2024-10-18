@@ -1,0 +1,7 @@
+#pragma version >=0.4.4;
+
+const int gas::gem_buffer_stake = 8260;
+const int gas::gem_buffer_unstake = 12409;
+
+const int gem_buffer_code::cells = 27;
+const int gem_buffer_code::bits = 4902;

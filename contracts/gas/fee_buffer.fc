@@ -1,0 +1,48 @@
+#pragma version >=0.4.4;
+#include "../lib/stdlib.fc";
+#include "export/buffer.fc";
+#include "forward/buffer.fc";
+
+int fee::buffer_add_liquidity() {
+  int compute_gas = gas::buffer_add_liquidity
+  ;; additional buffer_add_liquidity_notification compute gas maximum 100000
+    + 100000
+  ;; re-buffer_token if happens revert buffer_add_liquidity_notification
+    + gas::buffer_token;
+  int compute_fee = get_compute_fee(compute_gas, false);
+
+  int fwd_fee = 0
+  ;; forward fee buffer_add_liquidity_notification
+    + get_forward_fee(fwd::buffer_add_liquidity_notification::cells,
+    fwd::buffer_add_liquidity_notification::bits, false)
+
+  {- if happens revert buffer_add_liquidity_notification -}
+  ;; forward fee re-buffer_token
+    + get_forward_fee(fwd::buffer_token::cells, fwd::buffer_token::bits, false)
+  ;; foward send_excesses
+    + get_forward_fee(0, 0, false);
+
+  return compute_fee + fwd_fee;
+}
+
+int fee::buffer_refund_me() {
+  int compute_gas = gas::buffer_refund_me
+  ;; additional buffer_refund_me_notification compute gas maximum 50000
+    + 50000
+  ;; re-buffer_token if happens revert buffer_refund_me_notification
+    + gas::buffer_token;
+  int compute_fee = get_compute_fee(compute_gas, false);
+
+  int fwd_fee = 0
+  ;; forward fee buffer_refund_me_notification
+    + get_forward_fee(fwd::buffer_refund_me_notification::cells,
+    fwd::buffer_refund_me_notification::bits, false)
+
+  {- if happens revert buffer_refund_me_notification -}
+  ;; forward fee re-buffer_token
+    + get_forward_fee(fwd::buffer_token::cells, fwd::buffer_token::bits, false)
+  ;; foward send_excesses
+    + get_forward_fee(0, 0, false);
+
+  return compute_fee + fwd_fee;
+}

@@ -1,5 +1,5 @@
 import {Address, beginCell, Cell, ContractProvider} from '@ton/core'
-import {BaseContract, Op, packGrams, unpackGrams} from '../common'
+import {BaseContract, CommonOp, packGrams, unpackGrams} from '../common'
 
 export class BufferToken extends BaseContract {
   static fromAddress(address: Address) {
@@ -7,7 +7,7 @@ export class BufferToken extends BaseContract {
   }
 
   static msgTopUp() {
-    return beginCell().storeUint(Op.top_up, 32).storeUint(0, 64).endCell()
+    return beginCell().storeUint(CommonOp.top_up, 32).storeUint(0, 64).endCell()
   }
 
   async getBufferData(provider: ContractProvider) {
@@ -29,7 +29,7 @@ export class BufferToken extends BaseContract {
 
   static msgBufferAddLiquidity(args: {min_lp: bigint; amounts: bigint[]}) {
     return beginCell()
-      .storeUint(Op.buffer_add_liquidity, 32)
+      .storeUint(CommonOp.buffer_add_liquidity, 32)
       .storeUint(0, 64) // query_id
       .storeCoins(args.min_lp)
       .storeMaybeRef(packGrams(args.amounts))
@@ -38,7 +38,7 @@ export class BufferToken extends BaseContract {
 
   static msgBufferRefundMe() {
     return beginCell()
-      .storeUint(Op.buffer_refund_me, 32)
+      .storeUint(CommonOp.buffer_refund_me, 32)
       .storeUint(0, 64) // query_id
       .endCell()
   }

@@ -2,6 +2,7 @@ import {Address, beginCell, Cell, Dictionary, Slice} from '@ton/core'
 import {sha256_sync} from '@ton/crypto'
 import crc32 = require('crc-32')
 import bn from 'bignumber.js'
+import axios from 'axios'
 
 export type TokenMetadata = {
   image?: string
@@ -10,6 +11,12 @@ export type TokenMetadata = {
   description?: string
   decimals?: string
 }
+
+export type UnpackedTokenMetadata = {
+  type: 'onchain' | 'offchain'
+  uri?: string
+} & TokenMetadata
+type MetadataKey = keyof Omit<UnpackedTokenMetadata, 'type'>
 
 function stringHash(val: string) {
   return BigInt('0x' + sha256_sync(val).toString('hex'))
@@ -31,6 +38,59 @@ function storeHashmapContentData(meta: TokenMetadata) {
 export function createTokenOnchainMetadata(meta: TokenMetadata) {
   const hashmap_content = storeHashmapContentData(meta)
   return beginCell().storeUint(0, 8).storeDict(hashmap_content).endCell()
+}
+
+export async function unpackTokenMetadata(meta: Cell) {
+  const unpacked = {} as UnpackedTokenMetadata
+  const fields: MetadataKey[] = ['uri', 'image', 'name', 'symbol', 'description', 'decimals']
+
+  const ds = meta.beginParse()
+  if (!ds.remainingBits) return unpacked
+
+  const meta_type = ds.loadUint(8)
+  if (meta_type == 0) {
+    unpacked.type = 'onchain'
+    try {
+      const data = ds.loadDict(Dictionary.Keys.BigUint(256), Dictionary.Values.Cell())
+      for (const field of fields) {
+        const content_data = data.get(stringHash(field))
+        if (content_data) {
+          const ds = content_data.beginParse()
+
+          const content_data_type = ds.loadUint(8)
+          if (content_data_type == 0) {
+            // content_data snake
+            unpacked[field] = ds.loadStringTail()
+          } else {
+            // content_data chunks
+            const map_chunked_data = ds.loadDict(Dictionary.Keys.Uint(32), Dictionary.Values.Cell())
+            const chunked_data: string[] = []
+            map_chunked_data.keys().forEach((key) => {
+              const snake_data = map_chunked_data.get(key)
+              if (snake_data) {
+                chunked_data[key] = ds.loadStringTail()
+              }
+            })
+            unpacked[field] = chunked_data.join('')
+          }
+        }
+      }
+    } catch {}
+  } else {
+    unpacked.type = 'offchain'
+    const uri = ds.loadStringTail()
+    try {
+      const res = await axios.get(uri)
+      const offchain_data = res.data
+      for (const field of fields) {
+        if (offchain_data[field]) {
+          unpacked[field] = offchain_data[field]
+        }
+      }
+    } catch {}
+    unpacked.uri = uri
+  }
+  return unpacked
 }
 
 export function toBN(val: number | bigint | string) {

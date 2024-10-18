@@ -2,7 +2,7 @@ import {Address, beginCell, Cell, ContractProvider, Dictionary} from '@ton/core'
 import {
   BaseContract,
   createTokenOnchainMetadata,
-  Op,
+  CommonOp,
   packIdxToAddr,
   packGrams,
   packAddrToIdx,
@@ -25,11 +25,11 @@ export class StableSwapFactory extends BaseContract {
   }
 
   static msgTopUp() {
-    return beginCell().storeUint(Op.top_up, 32).storeUint(0, 64).endCell()
+    return beginCell().storeUint(CommonOp.top_up, 32).storeUint(0, 64).endCell()
   }
 
   static msgUpgrade(newCode: Cell) {
-    return beginCell().storeUint(Op.upgrade, 32).storeUint(0, 64).storeRef(newCode).endCell()
+    return beginCell().storeUint(CommonOp.upgrade, 32).storeUint(0, 64).storeRef(newCode).endCell()
   }
 
   static packInitState(args: {
@@ -117,7 +117,7 @@ export class StableSwapFactory extends BaseContract {
       .storeDict(packIdxToAddr(args.poolWallets))
       .endCell()
     return beginCell()
-      .storeUint(Op.factory_create_plain_pool, 32)
+      .storeUint(CommonOp.factory_create_plain_pool, 32)
       .storeUint(0, 64)
       .storeRef(wallets)
       .storeRef(createTokenOnchainMetadata({...args.metadata, decimals: '18'}))

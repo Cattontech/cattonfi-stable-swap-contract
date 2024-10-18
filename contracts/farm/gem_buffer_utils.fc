@@ -1,0 +1,24 @@
+#pragma version >=0.4.4;
+#include "../lib/stdlib.fc";
+#include "../lib/common.fc";
+#include "../lib/utils.fc";
+
+cell init_gem_buffer_data(slice pool, slice owner) inline {
+  return begin_cell()
+    .store_slice(pool)
+    .store_slice(owner)
+    .store_ref(begin_cell()
+      .store_coins(0) ;;amount
+      .store_uint(0, 256) ;;reward_debt
+      .store_coins(0) ;;pending_reward
+      .end_cell())
+    .end_cell();
+}
+
+(builder, builder, int) calc_gem_buffer_address(slice pool, slice owner, cell buffer_code) inline {
+  cell init_data = init_gem_buffer_data(pool, owner);
+  builder state_init = create_state_init(buffer_code, init_data);
+  int addr = state_init.end_cell().cell_hash();
+  builder buffer_addr = create_address(chain::base, addr);
+  return (buffer_addr, state_init, addr);
+}

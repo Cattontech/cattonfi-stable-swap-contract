@@ -1,0 +1,24 @@
+#pragma version >=0.4.4;
+
+;; -----------------------------------------------------------------------
+;; Constant
+;; -----------------------------------------------------------------------
+const int ACC_REWARD_PRECISION = 1000000000000; ;; 1e12
+
+;; -----------------------------------------------------------------------
+;; OpCode
+;; -----------------------------------------------------------------------
+const int op::gem_pool_earn = "gem_pool_earn"c;
+const int op::gem_pool_stake = "gem_pool_stake"c;
+const int op::gem_pool_unstake = "gem_pool_unstake"c;
+const int op::gem_pool_init = "gem_pool_init"c;
+const int op::gem_pool_change_reward = "gem_pool_change_reward"c;
+
+const int op::gem_buffer_stake = "gem_buffer_stake"c;
+const int op::gem_buffer_unstake = "gem_buffer_unstake"c;
+
+
+;; -----------------------------------------------------------------------
+;; ErrorCode
+;; -----------------------------------------------------------------------
+const int err::invalid_token = 200;

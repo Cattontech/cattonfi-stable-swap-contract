@@ -4,13 +4,13 @@ import {Token} from './base.utils'
 import {BufferToken, JettonWallet, Liquidity, PlainPool, StableSwapFactory} from '../../wrappers'
 import {ContractUtils} from '../../wrappers/test'
 
-type ExtendActors = {
+export type ExtendActors = {
   tokens: SandboxContract<JettonWallet>[]
   liquidity: SandboxContract<Liquidity>
   buffer: SandboxContract<BufferToken>
 }
 
-export class FactoryRuntimeState extends RuntimeState<ExtendActors> {
+export class FactoryRuntimeState<T extends ExtendActors = ExtendActors> extends RuntimeState<T> {
   mint_amount: bigint = 10n ** 9n
 
   tokens: Token<JettonWallet>[] = []

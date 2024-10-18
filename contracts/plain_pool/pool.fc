@@ -44,14 +44,13 @@ int index_of_wallet(int addr) impure inline {
   pool_provide_lp min_lp:(VarUInteger 16) = InternalMsgBody;
 -}
 () pool_provide_lp(slice sender, slice body, int query_id, tuple amounts) impure inline {
-  {-
+  int min_lp = body~load_coins();
+  var (buffer_addr, state_init, _) = calc_buffer_address(my_address(), sender, pool::buffer_code);
+
+  int fee = fee::pool_provide_lp(min_lp, false);
   int msg_val = get_incoming_value().pair_first();
   ;; ensure enough TON to execute transactions
   throw_unless(err::insufficient_fee, msg_val >= fee);
-  -}
-
-  int min_lp = body~load_coins();
-  var (buffer_addr, state_init, _) = calc_buffer_address(my_address(), sender, pool::buffer_code);
 
   builder buffer_token = begin_cell()
     .store_uint(op::buffer_token, 32)
@@ -69,9 +68,10 @@ int index_of_wallet(int addr) impure inline {
   int amount = body~load_coins();
   int min_lp = body~load_coins();
 
+  int fee = fee::pool_provide_lp(min_lp, true);
   int msg_val = get_incoming_value().pair_first();
   ;; ensure enough TON to execute transactions
-  throw_unless(err::insufficient_fee, msg_val - amount >= 0);
+  throw_unless(err::insufficient_fee, msg_val - amount >= fee);
 
   var (buffer_addr, state_init, _) = calc_buffer_address(my_address(), sender, pool::buffer_code);
 
@@ -90,12 +90,6 @@ int index_of_wallet(int addr) impure inline {
 }
 
 () pool_add_liquidity(slice sender, slice body) impure inline {
-  {-
-  int msg_val = get_incoming_value().pair_first();
-  ;; ensure enough TON to execute transactions
-  throw_unless(err::insufficient_fee, msg_val >= fee);
-  -}
-
   ;; buffer_add_liquidity_notification query_id:uint64 owner:MsgAddress
   ;;  min_lp:(VarUInteger 16) c_amounts:(Maybe ^Cell) = InternalMsgBody;
   int query_id = body~load_uint(64);
@@ -109,6 +103,11 @@ int index_of_wallet(int addr) impure inline {
   throw_unless(err::access_denied, equal_slices(sender, buffer_addr.to_slice()));
 
   try {
+    int fee = fee::pool_add_liquidity();
+    int msg_val = get_incoming_value().pair_first();
+    ;; ensure enough TON to execute transactions
+    throw_unless(err::insufficient_fee, msg_val >= fee);
+
     int lp_amount = add_liquidity(amounts, min_lp);
     mint_liquidity(owner, owner, lp_amount, query_id, 0, msg::remaining_value);
   } catch (_, error_code) {
@@ -127,6 +126,11 @@ int index_of_wallet(int addr) impure inline {
   pool_exchange pool_pay_wallet:uint256 min_out:(VarUInteger 16) = InternalMsgBody;
 -}
 () pool_exchange(slice sender, slice body, int query_id, int in_idx, int amount) impure inline {
+  int fee = fee::pool_exchange(false);
+  int msg_val = get_incoming_value().pair_first();
+  ;; ensure enough TON to execute transactions
+  throw_unless(err::insufficient_fee, msg_val >= fee);
+
   int pool_pay_wallet = body~load_uint(256);
   int min_out = body~load_coins();
 
@@ -151,9 +155,10 @@ int index_of_wallet(int addr) impure inline {
   int pool_pay_wallet = body~load_uint(256);
   int min_out = body~load_coins();
 
+  int fee = fee::pool_exchange(true);
   int msg_val = get_incoming_value().pair_first();
   ;; ensure enough TON to execute transactions
-  throw_unless(err::insufficient_fee, msg_val - amount >= 0);
+  throw_unless(err::insufficient_fee, msg_val - amount >= fee);
 
   int in_idx = index_of_wallet(0);
   int out_idx = index_of_wallet(pool_pay_wallet);
@@ -188,6 +193,10 @@ int index_of_wallet(int addr) impure inline {
   }
   send_msg_val = send_msg_val / n_coins;
 
+  int fee = get_forward_fee(fwd::send_token::cells, fwd::send_token::bits, false);
+  ;; ensure enough TON to execute transactions
+  throw_unless(err::insufficient_fee, send_msg_val >= fee);
+
   slice wallets = pool::wallets.begin_parse();
   wallets~skip_dict();
   cell idx_wallet = wallets~load_dict();
@@ -215,9 +224,9 @@ int index_of_wallet(int addr) impure inline {
 
       if pool_pay_wallet > 0 {
         builder pay_wallet = create_address(chain::base, pool_pay_wallet);
-        send_token(pay_wallet, recipient, return_excess, query_id, amount, send_msg_val, reason_code, mode + msg::ignore_errors);
+        send_token(pay_wallet, recipient, return_excess, query_id, amount, send_msg_val, reason_code, mode);
       } else {
-        send_pay_to(recipient, query_id, amount, 0, reason_code, msg::pay_gas_separately + msg::ignore_errors);
+        send_pay_to(recipient, query_id, amount, 0, reason_code, msg::pay_gas_separately);
         if idx == last_idx {
           send_excesses(return_excess, 0, mode + msg::ignore_errors);
         }
@@ -235,6 +244,7 @@ int index_of_wallet(int addr) impure inline {
   cell c_min_amounts = body~load_maybe_ref();
 
   tuple min_amounts = c_min_amounts.tuple::unpack_grams();
+  min_amounts~tuple::set_len(pool::n_coins, 0);
   tuple amounts = remove_liquidity(burn_amount, min_amounts);
 
   int msg_val = get_incoming_value().pair_first();
@@ -264,6 +274,7 @@ int index_of_wallet(int addr) impure inline {
     ;; int mint_msg_val = 1000000000; ;; 1 TON
     int mint_msg_val = get_compute_fee(gas::internal_transfer, false);
     send_msg_val -= mint_msg_val;
+    send_msg_val -= get_forward_fee(fwd::mint_liquidity::cells, fwd::mint_liquidity::bits, false);
     ;; pay remaining lp to user
     mint_liquidity(recipient, return_excess, burn_amount - lp_amount, query_id, mint_msg_val, msg::pay_gas_separately);
   }
@@ -275,6 +286,11 @@ int index_of_wallet(int addr) impure inline {
   pool_remove_liquidity_one_coin recipient:MsgAddress idx_token_out:uint4 min_amount:(VarUInteger 16) = InternalMsgBody;
 -}
 () pool_remove_liquidity_one_coin(slice sender, slice body, int query_id, int burn_amount, slice return_excess) impure inline {
+  int fee = fee::pool_remove_liquidity_one_coin();
+  int msg_val = get_incoming_value().pair_first();
+  ;; ensure enough TON to execute transactions
+  throw_unless(err::insufficient_fee, msg_val >= fee);
+
   slice recipient = body~load_msg_addr();
   int i = body~load_uint(4);
   int min_amount = body~load_coins();
@@ -292,7 +308,9 @@ int index_of_wallet(int addr) impure inline {
     builder pay_wallet = create_address(chain::base, pool_pay_wallet);
     send_token(pay_wallet, recipient, return_excess, query_id, out_amount, 0, op::pool_remove_liquidity_one_coin, msg::remaining_value);
   } else {
-    send_pay_to(recipient, query_id, out_amount, 0, op::pool_remove_liquidity_one_coin, msg::remaining_value);
+    raw_reserve(out_amount, reserve::add_original_balance + reserve::negate);
+    send_pay_to(recipient, query_id, out_amount, 0, op::pool_remove_liquidity_one_coin, msg::pay_gas_separately);
+    send_excesses(return_excess, 0, msg::unreserved_balance + msg::ignore_errors);
   }
 }
 

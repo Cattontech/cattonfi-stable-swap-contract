@@ -5,7 +5,7 @@ import {
   Errors,
   JettonMinter,
   JettonWallet,
-  Op,
+  CommonOp,
   packGrams,
   unpackIdxToAddr,
   unpackGrams,
@@ -23,7 +23,7 @@ export type AssetTransferMessage = {
 }
 
 function opName(code: number | bigint) {
-  return Object.keys(Op).find((key) => (Op as any)[key] == code)
+  return Object.keys(CommonOp).find((key) => (CommonOp as any)[key] == code)
 }
 function errName(code: number | bigint) {
   const name = Object.keys(Errors).find((key) => (Errors as any)[key] == code)
@@ -41,7 +41,7 @@ export class PlainPool extends JettonMinter {
   }
 
   static msgTopUp() {
-    return beginCell().storeUint(Op.top_up, 32).storeUint(0, 64).endCell()
+    return beginCell().storeUint(CommonOp.top_up, 32).storeUint(0, 64).endCell()
   }
 
   async getBufferAddress(provider: ContractProvider, owner: Address) {
@@ -171,12 +171,12 @@ export class PlainPool extends JettonMinter {
   }
 
   static msgProvideLp(args: {min_lp: bigint}) {
-    return beginCell().storeUint(Op.pool_provide_lp, 32).storeCoins(args.min_lp).endCell()
+    return beginCell().storeUint(CommonOp.pool_provide_lp, 32).storeCoins(args.min_lp).endCell()
   }
 
   static msgProvideLpTon(args: {amount: bigint; min_lp: bigint}) {
     return beginCell()
-      .storeUint(Op.pool_provide_lp_ton, 32)
+      .storeUint(CommonOp.pool_provide_lp_ton, 32)
       .storeUint(0, 64)
       .storeCoins(args.amount)
       .storeCoins(args.min_lp)
@@ -240,14 +240,14 @@ export class PlainPool extends JettonMinter {
 
   static msgExchange(args: {pool_pay_wallet: bigint; min_out: bigint}) {
     return beginCell()
-      .storeUint(Op.pool_exchange, 32)
+      .storeUint(CommonOp.pool_exchange, 32)
       .storeUint(args.pool_pay_wallet, 256)
       .storeCoins(args.min_out)
       .endCell()
   }
   static msgExchangeTon(args: {amount: bigint; pool_pay_wallet: bigint; min_out: bigint}) {
     return beginCell()
-      .storeUint(Op.pool_exchange_ton, 32)
+      .storeUint(CommonOp.pool_exchange_ton, 32)
       .storeUint(0, 64)
       .storeCoins(args.amount)
       .storeUint(args.pool_pay_wallet, 256)
@@ -259,7 +259,7 @@ export class PlainPool extends JettonMinter {
     if (transaction.inMessage?.info.type === 'internal' && this.address.equals(transaction.inMessage.info.src)) {
       const ds = transaction.inMessage.body.beginParse()
       const op = ds.remainingBits >= 32 ? ds.loadUint(32) : -1
-      if (op == Op.transfer) {
+      if (op == CommonOp.transfer) {
         ds.skip(64) // query_id
         const amount = ds.loadCoins()
         const to = ds.loadAddress()
@@ -271,7 +271,7 @@ export class PlainPool extends JettonMinter {
         const reason_name = opName(reason_code) || errName(reason_code)
         return {type: 'token', amount, to, reason_code, reason_name}
       }
-      if (op == Op.pay_to) {
+      if (op == CommonOp.pay_to) {
         ds.skip(64) // query_id
         const amount = ds.loadCoins()
         const to = transaction.inMessage.info.dest
@@ -338,7 +338,7 @@ export class PlainPool extends JettonMinter {
 
   static msgPoolRemoveLiquidity(args: {recipient: Address; min_amounts: bigint[]}) {
     return beginCell()
-      .storeUint(Op.pool_remove_liquidity, 32)
+      .storeUint(CommonOp.pool_remove_liquidity, 32)
       .storeAddress(args.recipient)
       .storeMaybeRef(packGrams(args.min_amounts))
       .endCell()
@@ -377,7 +377,7 @@ export class PlainPool extends JettonMinter {
 
   static msgPoolRemoveLiquidityImbalance(args: {recipient: Address; amounts: bigint[]}) {
     return beginCell()
-      .storeUint(Op.pool_remove_liquidity_imbalance, 32)
+      .storeUint(CommonOp.pool_remove_liquidity_imbalance, 32)
       .storeAddress(args.recipient)
       .storeMaybeRef(packGrams(args.amounts))
       .endCell()
@@ -417,7 +417,7 @@ export class PlainPool extends JettonMinter {
 
   static msgPoolRemoveLiquidityOneCoin(args: {recipient: Address; idx_out: number; min_amount: bigint}) {
     return beginCell()
-      .storeUint(Op.pool_remove_liquidity_one_coin, 32)
+      .storeUint(CommonOp.pool_remove_liquidity_one_coin, 32)
       .storeAddress(args.recipient)
       .storeUint(args.idx_out, 4)
       .storeCoins(args.min_amount)
@@ -479,20 +479,20 @@ export class PlainPool extends JettonMinter {
   }
 
   static msgClaimFee() {
-    return msgSimple(Op.pool_claim_fee)
+    return msgSimple(CommonOp.pool_claim_fee)
   }
 
   static msgKillMe() {
-    return msgSimple(Op.pool_kill_me)
+    return msgSimple(CommonOp.pool_kill_me)
   }
 
   static msgUnkillMe() {
-    return msgSimple(Op.pool_unkill_me)
+    return msgSimple(CommonOp.pool_unkill_me)
   }
 
   static msgRampA(args: {future_a: bigint | number; future_time: bigint | number}) {
     return beginCell()
-      .storeUint(Op.pool_ramp_a, 32)
+      .storeUint(CommonOp.pool_ramp_a, 32)
       .storeUint(0, 64)
       .storeUint(args.future_a, 32)
       .storeUint(args.future_time, 64)
@@ -500,12 +500,12 @@ export class PlainPool extends JettonMinter {
   }
 
   static msgStopRampA() {
-    return msgSimple(Op.pool_stop_ramp_a)
+    return msgSimple(CommonOp.pool_stop_ramp_a)
   }
 
   static msgCommitNewFee(args: {new_fee: bigint | number; new_admin_fee: bigint | number}) {
     return beginCell()
-      .storeUint(Op.pool_commit_new_fee, 32)
+      .storeUint(CommonOp.pool_commit_new_fee, 32)
       .storeUint(0, 64)
       .storeUint(args.new_fee, 64)
       .storeUint(args.new_admin_fee, 64)
@@ -513,32 +513,32 @@ export class PlainPool extends JettonMinter {
   }
 
   static msgApplyNewFee() {
-    return msgSimple(Op.pool_apply_new_fee)
+    return msgSimple(CommonOp.pool_apply_new_fee)
   }
 
   static msgRevertNewParameters() {
-    return msgSimple(Op.pool_revert_new_parameters)
+    return msgSimple(CommonOp.pool_revert_new_parameters)
   }
 
   static msgCommitTransferOwnership(args: {new_admin: Address | null}) {
     return beginCell()
-      .storeUint(Op.pool_commit_transfer_ownership, 32)
+      .storeUint(CommonOp.pool_commit_transfer_ownership, 32)
       .storeUint(0, 64)
       .storeAddress(args.new_admin)
       .endCell()
   }
 
   static msgApplyTransferOwnership() {
-    return msgSimple(Op.pool_apply_transfer_ownership)
+    return msgSimple(CommonOp.pool_apply_transfer_ownership)
   }
 
   static msgRevertTransferOwnership() {
-    return msgSimple(Op.pool_revert_transfer_ownership)
+    return msgSimple(CommonOp.pool_revert_transfer_ownership)
   }
 
   static msgNewContent(args: Omit<TokenMetadata, 'decimals'>) {
     return beginCell()
-      .storeUint(Op.pool_new_content, 32)
+      .storeUint(CommonOp.pool_new_content, 32)
       .storeUint(0, 64)
       .storeRef(
         createTokenOnchainMetadata({
@@ -551,13 +551,13 @@ export class PlainPool extends JettonMinter {
 
   static msgNewFeeRecipient(args: {fee_recipient: Address | null}) {
     return beginCell()
-      .storeUint(Op.pool_new_fee_recipient, 32)
+      .storeUint(CommonOp.pool_new_fee_recipient, 32)
       .storeUint(0, 64)
       .storeAddress(args.fee_recipient)
       .endCell()
   }
 
   static msgUpgrade(code: Cell) {
-    return beginCell().storeUint(Op.upgrade, 32).storeUint(0, 64).storeRef(code).endCell()
+    return beginCell().storeUint(CommonOp.upgrade, 32).storeUint(0, 64).storeRef(code).endCell()
   }
 }
