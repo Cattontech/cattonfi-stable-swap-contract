@@ -7,15 +7,21 @@
 -   `tests` - tests for the contracts.
 -   `scripts` - scripts used by the project, mainly the deployment scripts.
 
+## Contract Futures
+
+:white_check_mark: gem_pool: Stake LP to earn Catton GEM
+:white_check_mark: stable_swap_factory: Permissionless Liquidity Pool
+:white_check_mark: stable_swap: Plain Pools
+:white_large_square: stable_swap: Lending Pools
+:white_large_square: stable_swap: Metapools
+:white_large_square: stable_swap: SwapRouter
+
 ## How to use
-
-### Build
-
-`npm run build`
 
 ### Test
 
 `npm test tests/max_gas_plain_pool.spec.ts > out.log`
+`npm test tests/max_gas_gem_pool.spec.ts > out.log`
 
 ### Deploy or run another script
 
