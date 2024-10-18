@@ -20,8 +20,12 @@
 
 ### Test
 
-`npm test tests/max_gas_plain_pool.spec.ts > out.log`
-`npm test tests/max_gas_gem_pool.spec.ts > out.log`
+```sh
+npm test tests/max_gas_plain_pool.spec.ts > out.log
+```
+```sh
+npm test tests/max_gas_gem_pool.spec.ts > out.log
+```
 
 ### Deploy or run another script
 
