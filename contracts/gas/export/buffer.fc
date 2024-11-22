@@ -1,0 +1,8 @@
+#pragma version >=0.4.4;
+
+const int gas::buffer_token = 18160;
+const int gas::buffer_add_liquidity = 18640;
+const int gas::buffer_refund_me = 7386;
+
+const int buffer_code::cells = 28;
+const int buffer_code::bits = 5775;

@@ -1,0 +1,42 @@
+#pragma version >=0.4.4;
+#include "export/liquidity.fc";
+#include "export/gem_pool.fc";
+#include "export/gem_buffer.fc";
+#include "forward/gem_pool.fc";
+#include "store_gem_buffer.fc";
+#include "fee_liquidity.fc";
+
+int fee::gem_buffer_claim_gem() {
+  int compute_gas = 0
+    + gas::gem_buffer_unstake
+    + gas::gem_pool_unstake
+    + gas::gem_pool_earn ;; earn reward
+    + gas::gem_buffer_stake; ;; restake
+  int compute_fee = get_compute_fee(compute_gas, false);
+
+  int fwd_fee = 0
+    + get_forward_fee(fwd::gem_pool_unstake::cells, fwd::gem_pool_unstake::bits, false)
+    + get_forward_fee(fwd::gem_pool_earn::cells, fwd::gem_pool_earn::bits, false)
+    + get_forward_fee(fwd::gem_buffer_stake::cells, fwd::gem_buffer_stake::bits, false);
+
+  return compute_fee + fwd_fee;
+}
+
+int fee::gem_buffer_unstake_take_lp() {
+  int fee_claim = fee::gem_buffer_claim_gem();
+  int fee_tranfer_liquidity = 0
+    + fee::send_liquidity()
+    + 2 * get_forward_fee(fwd::send_token::cells, fwd::send_token::bits, false);
+
+  return fee_claim + fee_tranfer_liquidity;
+}
+
+int fee::gem_buffer_unstake_take_tokens() {
+  int fee_claim = fee::gem_buffer_claim_gem();
+  int fee_remove_liquidity = fee::burn_liquidity();
+
+  int fwd_fee = get_forward_fee(fwd::pool_remove_liquidity::cells, fwd::pool_remove_liquidity::bits, false);
+  ;; [#####] append (n_coin) tranfer token fees
+
+  return fee_claim + fee_remove_liquidity + fwd_fee;
+}

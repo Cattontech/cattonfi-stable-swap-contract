@@ -1,0 +1,524 @@
+#pragma version >=0.4.4;
+#include "../lib/stdlib.fc";
+#include "../lib/tuple.fc";
+#include "../lib/common.fc";
+#include "../lib/utils.fc";
+#include "../liquidity/buffer_op.fc";
+#include "../liquidity/buffer_utils.fc";
+#include "../liquidity/liquidity_utils.fc";
+#include "../gas/export/liquidity.fc";
+#include "../gas/fee_plain_pool.fc";
+#include "pool_op.fc";
+#include "pool_store.fc";
+#include "pool_curve.fc";
+#include "pool_manager.fc";
+
+() mint_liquidity(
+  slice recipient,
+  slice response_address,
+  int amount,
+  int query_id,
+  int msg_val,
+  int mode
+) impure inline {
+  var (recipient_wallet, state_init, _) = calc_liquidity_wallet_address(my_address(), recipient, pool::liquidity_code);
+  builder internal_transfer = begin_cell()
+    .store_uint(op::internal_transfer, 32)
+    .store_uint(query_id, 64)
+    .store_coins(amount)
+    .store_slice(my_address()) ;; from
+    .store_slice(response_address) ;; response_address
+    .store_coins(0) ;; forward_ton_amount
+    .store_maybe_ref(null()); ;; forward_payload
+  send_msg(false, recipient_wallet, state_init, internal_transfer, msg_val, mode);
+}
+
+int index_of_wallet(int addr) impure inline {
+  cell wallet_idx = pool::wallets.begin_parse().preload_dict();
+  var (ds, is_exist?) = wallet_idx.udict_get?(256, addr);
+  throw_unless(err::no_wallet, is_exist? & (slice_bits(ds) == 4));
+  return ds~load_uint(4);
+}
+
+{-
+  pool_provide_lp min_lp:(VarUInteger 16) n_coins:uint4 = InternalMsgBody;
+-}
+() pool_provide_lp(slice sender, slice body, int query_id, tuple amounts) impure inline {
+  int min_lp = body~load_coins();
+  int n_coins = body~load_uint(4);
+  var (buffer_addr, state_init, _) = calc_buffer_address(my_address(), sender, pool::buffer_code);
+
+  int fee = fee::pool_provide_lp(min_lp, false);
+  int msg_val = get_incoming_value().pair_first();
+  ;; ensure enough TON to execute transactions
+  throw_unless(err::insufficient_fee, msg_val >= fee);
+
+  builder buffer_token = begin_cell()
+    .store_uint(op::buffer_token, 32)
+    .store_uint(query_id, 64)
+    .store_coins(min_lp)
+    .store_uint(n_coins, 4)
+    .store_maybe_ref(amounts.tuple::pack_grams());
+  send_msg(false, buffer_addr, state_init, buffer_token, 0, msg::remaining_value);
+}
+
+{-
+  pool_provide_lp query_id:uint64 amount:(VarUInteger 16) min_lp:(VarUInteger 16) n_coins:uint4 = InternalMsgBody;
+-}
+() pool_provide_lp_ton(slice sender, slice body) impure inline {
+  int query_id = body~load_uint(64);
+  int amount = body~load_coins();
+  int min_lp = body~load_coins();
+  int n_coins = body~load_uint(4);
+
+  int fee = fee::pool_provide_lp(min_lp, true);
+  int msg_val = get_incoming_value().pair_first();
+  ;; ensure enough TON to execute transactions
+  throw_unless(err::insufficient_fee, msg_val - amount >= fee);
+
+  var (buffer_addr, state_init, _) = calc_buffer_address(my_address(), sender, pool::buffer_code);
+
+  int idx = index_of_wallet(0);
+  tuple amounts = empty_tuple();
+  amounts~tuple::set_len(pool::n_coins, 0);
+  amounts~tset(idx, amount);
+
+  raw_reserve(amount, reserve::add_original_balance);
+  builder buffer_token = begin_cell()
+    .store_uint(op::buffer_token, 32)
+    .store_uint(query_id, 64)
+    .store_coins(min_lp)
+    .store_uint(n_coins, 4)
+    .store_maybe_ref(amounts.tuple::pack_grams());
+  send_msg(false, buffer_addr, state_init, buffer_token, 0, msg::unreserved_balance);
+}
+
+() pool_add_liquidity(slice sender, slice body) impure inline {
+  ;; buffer_add_liquidity_notification query_id:uint64 owner:MsgAddress
+  ;;  min_lp:(VarUInteger 16) c_amounts:(Maybe ^Cell) = InternalMsgBody;
+  int query_id = body~load_uint(64);
+  slice owner = body~load_msg_addr();
+  int min_lp = body~load_coins();
+  cell c_amounts = body~load_maybe_ref();
+  tuple amounts = c_amounts.tuple::unpack_grams();
+
+  when::chain(chain::base, owner);
+  var (buffer_addr, state_init, _) = calc_buffer_address(my_address(), owner, pool::buffer_code);
+  throw_unless(err::access_denied, equal_slices(sender, buffer_addr.to_slice()));
+
+  try {
+    int fee = fee::pool_add_liquidity();
+    int msg_val = get_incoming_value().pair_first();
+    ;; ensure enough TON to execute transactions
+    throw_unless(err::insufficient_fee, msg_val >= fee);
+
+    int lp_amount = add_liquidity(amounts, min_lp);
+    mint_liquidity(owner, owner, lp_amount, query_id, 0, msg::remaining_value);
+  } catch (_, error_code) {
+    ;; restore buffer tokens if action fails
+    builder buffer_token = begin_cell()
+      .store_uint(op::buffer_token, 32)
+      .store_uint(query_id, 64)
+      .store_coins(0) ;; min_lp = 0 => don't loop call add_liquidity
+      .store_maybe_ref(c_amounts);
+    send_msg(false, buffer_addr, state_init, buffer_token, 0, msg::remaining_value + msg::ignore_errors);
+    throw(0);
+  }
+}
+
+{-
+  pool_exchange pool_pay_wallet:uint256 min_out:(VarUInteger 16) = InternalMsgBody;
+-}
+() pool_exchange(slice sender, slice body, int query_id, int in_idx, int amount) impure inline {
+  int fee = fee::pool_exchange(false);
+  int msg_val = get_incoming_value().pair_first();
+  ;; ensure enough TON to execute transactions
+  throw_unless(err::insufficient_fee, msg_val >= fee);
+
+  int pool_pay_wallet = body~load_uint(256);
+  int min_out = body~load_coins();
+
+  int out_idx = index_of_wallet(pool_pay_wallet);
+  int amount_out = exchange(in_idx, out_idx, amount, min_out);
+
+  if pool_pay_wallet > 0 {
+    builder pay_wallet = create_address(chain::base, pool_pay_wallet);
+    send_token(pay_wallet, sender, sender, query_id, amount_out, 0, op::pool_exchange, msg::remaining_value);
+  } else {
+    send_pay_to(sender, query_id, amount_out, 0, op::pool_exchange, msg::remaining_value);
+  }
+}
+
+{-
+  pool_exchange_ton query_id:uint64 amount:(VarUInteger 16)
+    pool_pay_wallet:uint256 min_out:(VarUInteger 16) = InternalMsgBody;
+-}
+() pool_exchange_ton(slice sender, slice body) impure inline {
+  int query_id = body~load_uint(64);
+  int amount = body~load_coins();
+  int pool_pay_wallet = body~load_uint(256);
+  int min_out = body~load_coins();
+
+  int fee = fee::pool_exchange(true);
+  int msg_val = get_incoming_value().pair_first();
+  ;; ensure enough TON to execute transactions
+  throw_unless(err::insufficient_fee, msg_val - amount >= fee);
+
+  int in_idx = index_of_wallet(0);
+  int out_idx = index_of_wallet(pool_pay_wallet);
+  int amount_out = exchange(in_idx, out_idx, amount, min_out);
+
+  raw_reserve(amount, reserve::add_original_balance);
+  if pool_pay_wallet > 0 {
+    builder pay_wallet = create_address(chain::base, pool_pay_wallet);
+    send_token(pay_wallet, sender, sender, query_id, amount_out, 0, op::pool_exchange, msg::unreserved_balance);
+  } else {
+    send_pay_to(sender, query_id, amount_out, 0, op::pool_exchange, msg::unreserved_balance);
+  }
+}
+
+() pay_multi_coins(
+  tuple amounts,
+  int query_id,
+  slice recipient,
+  slice return_excess,
+  int send_msg_val,
+  int reason_code
+) impure inline {
+  int idx = 0;
+  int n_coins = 0;
+  int last_idx = 0;
+  repeat(pool::n_coins) {
+    if amounts.at(idx) > 0 {
+      n_coins += 1;
+      last_idx = idx;
+    }
+    idx += 1;
+  }
+  send_msg_val = send_msg_val / n_coins;
+
+  int fee = get_forward_fee(fwd::send_token::cells, fwd::send_token::bits, false);
+  ;; ensure enough TON to execute transactions
+  throw_unless(err::insufficient_fee, send_msg_val >= fee);
+
+  slice wallets = pool::wallets.begin_parse();
+  wallets~skip_dict();
+  cell idx_wallet = wallets~load_dict();
+
+  idx = 0;
+  int ton_spended = 0;
+  int mode = msg::regular;
+  repeat(pool::n_coins) {
+    int amount = amounts.at(idx);
+
+    if amount > 0 {
+      var (ds, is_exist?) = idx_wallet.udict_get?(4, idx);
+      throw_unless(err::no_wallet, is_exist? & (slice_bits(ds) == 256));
+      int pool_pay_wallet = ds~load_uint(256);
+
+      if pool_pay_wallet == 0 {
+        ton_spended += amount;
+      }
+
+      if idx == last_idx {
+        send_msg_val = 0;
+        mode = msg::unreserved_balance;
+        raw_reserve(ton_spended, reserve::add_original_balance + reserve::negate);
+      }
+
+      if pool_pay_wallet > 0 {
+        builder pay_wallet = create_address(chain::base, pool_pay_wallet);
+        send_token(pay_wallet, recipient, return_excess, query_id, amount, send_msg_val, reason_code, mode);
+      } else {
+        send_pay_to(recipient, query_id, amount, 0, reason_code, msg::pay_gas_separately);
+        if idx == last_idx {
+          send_excesses(return_excess, 0, mode + msg::ignore_errors);
+        }
+      }
+    }
+    idx += 1;
+  }
+}
+
+{-
+  pool_remove_liquidity recipient:MsgAddress c_min_amounts:(Maybe ^Cell) = InternalMsgBody;
+-}
+() pool_remove_liquidity(slice sender, slice body, int query_id, int burn_amount, slice return_excess) impure inline {
+  slice recipient = body~load_msg_addr();
+  cell c_min_amounts = body~load_maybe_ref();
+
+  tuple min_amounts = c_min_amounts.tuple::unpack_grams();
+  min_amounts~tuple::set_len(pool::n_coins, 0);
+  tuple amounts = remove_liquidity(burn_amount, min_amounts);
+
+  int msg_val = get_incoming_value().pair_first();
+  ;; int compute_fee = get_compute_fee(1000000, false); ;; 1 TON when gas price is 1000
+  int compute_fee = get_compute_fee(gas::pool_remove_liquidity, false);
+  int send_msg_val = msg_val - compute_fee;
+
+  pay_multi_coins(amounts, query_id, recipient, return_excess, send_msg_val, op::pool_remove_liquidity);
+}
+
+{-
+  pool_remove_liquidity_imbalance recipient:MsgAddress c_amounts:(Maybe ^Cell) = InternalMsgBody;
+-}
+() pool_remove_liquidity_imbalance(slice sender, slice body, int query_id, int burn_amount, slice return_excess) impure inline {
+  slice recipient = body~load_msg_addr();
+  cell c_amounts = body~load_maybe_ref();
+
+  tuple amounts = c_amounts.tuple::unpack_grams();
+  int lp_amount = remove_liquidity_imbalance(amounts, burn_amount);
+
+  int msg_val = get_incoming_value().pair_first();
+  ;; int compute_fee = get_compute_fee(1000000, false); ;; 1 TON when gas price is 1000
+  int compute_fee = get_compute_fee(gas::pool_remove_liquidity_imbalance, false);
+  int send_msg_val = msg_val - compute_fee;
+
+  if lp_amount < burn_amount {
+    ;; int mint_msg_val = 1000000000; ;; 1 TON
+    int mint_msg_val = get_compute_fee(gas::internal_transfer, false);
+    send_msg_val -= mint_msg_val;
+    send_msg_val -= get_forward_fee(fwd::mint_liquidity::cells, fwd::mint_liquidity::bits, false);
+    ;; pay remaining lp to user
+    mint_liquidity(recipient, return_excess, burn_amount - lp_amount, query_id, mint_msg_val, msg::pay_gas_separately);
+  }
+
+  pay_multi_coins(amounts, query_id, recipient, return_excess, send_msg_val, op::pool_remove_liquidity_imbalance);
+}
+
+{-
+  pool_remove_liquidity_one_coin recipient:MsgAddress idx_token_out:uint4 min_amount:(VarUInteger 16) = InternalMsgBody;
+-}
+() pool_remove_liquidity_one_coin(slice sender, slice body, int query_id, int burn_amount, slice return_excess) impure inline {
+  int fee = fee::pool_remove_liquidity_one_coin();
+  int msg_val = get_incoming_value().pair_first();
+  ;; ensure enough TON to execute transactions
+  throw_unless(err::insufficient_fee, msg_val >= fee);
+
+  slice recipient = body~load_msg_addr();
+  int i = body~load_uint(4);
+  int min_amount = body~load_coins();
+
+  int out_amount = remove_liquidity_one_coin(burn_amount, i, min_amount);
+
+  body = pool::wallets.begin_parse();
+  body~skip_dict();
+  cell idx_wallet = body~load_dict();
+  var (ds, is_exist?) = idx_wallet.udict_get?(4, i);
+  throw_unless(err::no_wallet, is_exist? & (slice_bits(ds) == 256));
+  int pool_pay_wallet = ds~load_uint(256);
+
+  if pool_pay_wallet > 0 {
+    builder pay_wallet = create_address(chain::base, pool_pay_wallet);
+    send_token(pay_wallet, recipient, return_excess, query_id, out_amount, 0, op::pool_remove_liquidity_one_coin, msg::remaining_value);
+  } else {
+    raw_reserve(out_amount, reserve::add_original_balance + reserve::negate);
+    send_pay_to(recipient, query_id, out_amount, 0, op::pool_remove_liquidity_one_coin, msg::pay_gas_separately);
+    send_excesses(return_excess, 0, msg::unreserved_balance + msg::ignore_errors);
+  }
+}
+
+{-
+  burn_notification query_id:uint64 amount:(VarUInteger 16) sender:MsgAddress
+    response_destination:MsgAddress custom_payload:(Maybe ^Cell) = InternalMsgBody;
+-}
+() pool_burn_notification(slice sender, slice body) impure inline {
+  int query_id = body~load_uint(64);
+  int burn_amount = body~load_coins();
+  slice owner = body~load_msg_addr();
+  slice return_excess = body~load_msg_addr();
+
+  var (liquidity_addr, _, _) = calc_liquidity_wallet_address(my_address(), owner, pool::liquidity_code);
+  throw_unless(err::access_denied, equal_slices(sender, liquidity_addr.to_slice()));
+
+  body = body~load_maybe_ref().begin_parse(); ;; custom_payload
+  if ~ body.slice_empty?() {
+    int op = body~load_uint(32);
+
+    if op == op::pool_remove_liquidity {
+      return pool_remove_liquidity(owner, body, query_id, burn_amount, return_excess);
+    }
+
+    if op == op::pool_remove_liquidity_imbalance {
+      return pool_remove_liquidity_imbalance(owner, body, query_id, burn_amount, return_excess);
+    }
+
+    if op == op::pool_remove_liquidity_one_coin {
+      return pool_remove_liquidity_one_coin(owner, body, query_id, burn_amount, return_excess);
+    }
+
+    throw(err::invalid_op);
+  } else {
+    ;; burn with no payload:
+    pool::liquidity_supply -= burn_amount;
+  }
+
+  if ~ return_excess.addr_none?() {
+    send_excesses(return_excess, 0, msg::remaining_value + msg::ignore_errors);
+  }
+}
+
+() pool_refund_me(slice sender, slice body) impure inline {
+  ;; buffer_refund_me_notification query_id:uint64 owner:MsgAddress
+  ;;   c_amounts:(Maybe ^Cell) = InternalMsgBody;
+  int query_id = body~load_uint(64);
+  slice owner = body~load_msg_addr();
+  cell c_amounts = body~load_maybe_ref();
+
+  when::chain(chain::base, owner);
+  var (buffer_addr, state_init, _) = calc_buffer_address(my_address(), owner, pool::buffer_code);
+  throw_unless(err::access_denied, equal_slices(sender, buffer_addr.to_slice()));
+
+  int msg_val = get_incoming_value().pair_first();
+  ;; int compute_fee = get_compute_fee(1000000, false); ;; 1 TON when gas price is 1000
+  int compute_fee = get_compute_fee(gas::pool_refund_me, false);
+  int send_msg_val = msg_val - compute_fee;
+
+  tuple amounts = c_amounts.tuple::unpack_grams();
+  throw_unless(err::no_wallet, pool::n_coins == amounts.tlen());
+
+  pay_multi_coins(amounts, query_id, owner, owner, send_msg_val, op::buffer_refund_me);
+}
+
+{-
+  pool_claim_fee query_id:uint64 = InternalMsgBody;
+-}
+() pool_claim_fee(slice sender, slice body) impure inline {
+  int query_id = body~load_uint(64);
+
+  int msg_val = get_incoming_value().pair_first();
+  ;; int compute_fee = get_compute_fee(1000000, false); ;; 1 TON when gas price is 1000
+  int compute_fee = get_compute_fee(gas::pool_claim_fee, false);
+  int send_msg_val = msg_val - compute_fee;
+
+  tuple amounts = pool::admin_balances.tuple::unpack_grams();
+
+  tuple zero_balances = empty_tuple();
+  zero_balances~tuple::set_len(pool::n_coins, 0);
+  pool::admin_balances = zero_balances.tuple::pack_grams();
+
+  pay_multi_coins(amounts, query_id, pool::fee_recipient, sender, send_msg_val, op::pool_claim_fee);
+}
+
+;;; @note can't inline try catch in this case
+() pool_transfer_notification(slice pool_wallet, slice body) impure {
+  ;; transfer_notification query_id:uint64 amount:(VarUInteger 16)
+  ;;   sender:MsgAddress forward_payload:(Either Cell ^Cell) = InternalMsgBody;
+  int query_id = body~load_uint(64);
+  int amount = body~load_coins();
+  slice sender = body~load_msg_addr();
+  throw_if(err::zero_amount, amount == 0); ;; transfer zero amount
+
+  ;; Standard `forward_payload:(Either Cell ^Cell)`
+  ;; We use forward_payload:(Maybe ^Cell)
+  body = body~load_maybe_ref().begin_parse();
+  throw_if(0, body.slice_empty?()); ;; noPayload
+
+  int op = body~load_uint(32);
+  var (wc, addr) = parse_std_addr(pool_wallet);
+  throw_unless(err::workchain, (wc == chain::base) & (addr != 0));
+
+  try {
+    int idx = index_of_wallet(addr);
+
+    if op == op::pool_exchange {
+      return pool_exchange(sender, body, query_id, idx, amount);
+    }
+    if op == op::pool_provide_lp {
+      tuple amounts = empty_tuple();
+      amounts~tuple::set_len(pool::n_coins, 0);
+      amounts~tset(idx, amount);
+      return pool_provide_lp(sender, body, query_id, amounts);
+    }
+  } catch (_, error_code) {
+    ;; refund tokens if action fails
+    send_token(pool_wallet.to_builder(), sender, sender, query_id, amount, 0, error_code, msg::remaining_value + msg::ignore_errors);
+    throw(0);
+  }
+
+  throw(err::invalid_op);
+}
+
+() on_bounce(slice body) impure {
+  body~skip_bits(32);
+  int op = body~load_uint(32);
+  body~skip_bits(64); ;; query_id
+  throw(0);
+}
+
+() route_internal_message(int flags, slice sender, slice body, slice cs) impure inline {
+  if flags & 1 {
+    return on_bounce(body);
+  }
+
+  int op = body~load_uint(32);
+
+  ;; receive from `jetton_wallet`
+  if op == op::transfer_notification {
+    return pool_transfer_notification(sender, body);
+  }
+  ;; receive from `user`
+  if op == op::pool_exchange_ton {
+    return pool_exchange_ton(sender, body);
+  }
+  ;; receive from `user`
+  if op == op::pool_provide_lp_ton {
+    return pool_provide_lp_ton(sender, body);
+  }
+  ;; receive from `buffer`
+  if op == op::buffer_add_liquidity_notification {
+    return pool_add_liquidity(sender, body);
+  }
+  ;; receive from `buffer`
+  if op == op::buffer_refund_me_notification {
+    return pool_refund_me(sender, body);
+  }
+  ;; receive from `liquidity`
+  if op == op::burn_notification {
+    return pool_burn_notification(sender, body);
+  }
+  ;; receive from `admin`
+  if op == op::pool_init {
+    return pool_init(sender, body);
+  }
+  ;; receive from `any`
+  if op == op::pool_claim_fee {
+    return pool_claim_fee(sender, body);
+  }
+
+  ;; top up TON balance
+  if op == op::top_up {
+    throw(0); ;; do nothing
+  }
+
+  ;; receive from `admin`
+  return pool_manager(sender, op, body);
+}
+
+() recv_internal(cell in_msg_full, slice in_msg_body) impure {
+  ;; ~strdump("pool:get_storage_fees"); ~dump(get_storage_fees());
+  slice cs = in_msg_full.begin_parse();
+  int flags = cs~load_uint(4);
+  slice sender = cs~load_msg_addr();
+
+  pool::load_data();
+  route_internal_message(flags, sender, in_msg_body, cs);
+  pool::save_data();
+}
+
+(int, int, slice, cell, cell) get_jetton_data() method_id {
+  pool::load_data();
+  return (pool::liquidity_supply, true, pool::admin, pool::jetton_content, pool::liquidity_code);
+}
+
+slice get_wallet_address(slice owner) method_id {
+  pool::load_data();
+  var (liquidity_wallet, _, _) = calc_liquidity_wallet_address(my_address(), owner, pool::liquidity_code);
+  return liquidity_wallet.to_slice();
+}
+
+slice get_buffer_address(slice owner) method_id {
+  pool::load_data();
+  var (buffer_address, _, _) = calc_buffer_address(my_address(), owner, pool::buffer_code);
+  return buffer_address.to_slice();
+}

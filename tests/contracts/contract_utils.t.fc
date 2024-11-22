@@ -1,0 +1,112 @@
+#pragma version >=0.4.4;
+#include "../../contracts/lib/stdlib.fc";
+#include "../../contracts/lib/tuple.fc";
+#include "../../contracts/lib/utils.fc";
+
+global cell store::balances;
+
+() load_data() impure {
+  slice ds = get_data().begin_parse();
+  store::balances = ds~load_maybe_ref();
+}
+
+() save_data() impure inline_ref {
+  set_data(begin_cell()
+    .store_maybe_ref(store::balances)
+    .end_cell()
+  );
+}
+
+() test_tupe() impure inline {
+  tuple t_balances = store::balances.tuple::unpack_grams();
+  ~strdump("test:unpack_grams"); ~dump(t_balances);
+
+  t_balances~tuple::set(1, 5000000000, 0);
+  ~strdump("test:tuple_edit"); ~dump(t_balances);
+  ~strdump("test:tuple_reverse"); ~dump(t_balances.tuple::reverse()); ~dump(t_balances);
+
+  int idx = 0;
+  while(idx < t_balances.tlen()) {
+    ~strdump("test:tuple_at"); ~dump(t_balances.tuple::at(idx, 0));
+    idx += 1;
+  }
+
+  ~strdump("test:tuple_at 10"); ~dump(t_balances.tuple::at(10, 0));
+  t_balances~tuple::set(10, 10000000000, 0);
+  ~strdump("test:tuple_set"); ~dump(t_balances);
+
+  idx = 0;
+  while(idx < t_balances.tlen()) {
+    ~strdump("test:tuple_at"); ~dump(t_balances.tuple::at(idx, 0));
+    idx += 1;
+  }
+
+  tuple b_balances = t_balances;
+  t_balances~tuple::set_len(20, 0);
+  ~strdump("test:b_balances"); ~dump(b_balances);
+  ~strdump("test:t_balances"); ~dump(t_balances);
+
+  store::balances = t_balances.tuple::pack_grams();
+  t_balances = store::balances.tuple::unpack_grams();
+  ~strdump("test:unpack_grams"); ~dump(t_balances);
+}
+
+() route_internal_message(int flags, slice sender, slice body, slice cs) impure inline {
+  if flags & 1 {
+    return ();
+  }
+
+  int op = body~load_uint(32);
+  if op == "test_tupe"c {
+    return test_tupe();
+  }
+}
+
+() recv_internal(cell in_msg_full, slice in_msg_body) impure {
+  ;; ~strdump("test:get_storage_fees"); ~dump([get_storage_fees(), get_storage_due(), now()]);
+  slice cs = in_msg_full.begin_parse();
+  int flags = cs~load_uint(4);
+  slice sender = cs~load_msg_addr();
+
+  load_data();
+  route_internal_message(flags, sender, in_msg_body, cs);
+  save_data();
+}
+
+(
+  int, int, int, int, int, int,
+  int, int, int, int
+) get_chain_config_param() method_id {
+  ;; // msg_fwd_fees = (lump_price + ceil((bit_price * msg.bits + cell_price * msg.cells)/2^16)) nanograms
+  ;; // ihr_fwd_fees = ceil((msg_fwd_fees * ihr_price_factor)/2^16) nanograms
+  ;; // bits in the root cell of a message are not included in msg.bits (lump_price pays for them)
+  ;; msg_forward_prices#ea lump_price:uint64 bit_price:uint64 cell_price:uint64
+  ;;   ihr_price_factor:uint32 first_frac:uint16 next_frac:uint16 = MsgForwardPrices;
+  ;; // used for messages to/from masterchain
+  ;; config_mc_fwd_prices#_ MsgForwardPrices = ConfigParam 24;
+  ;; // used for all other messages
+  ;; config_fwd_prices#_ MsgForwardPrices = ConfigParam 25;
+  slice cs = config_param(25).begin_parse().skip_bits(8);
+  var (lum_price, bit_price, cell_price, ihr_price_factor, first_frac, next_frac)
+    = (cs~load_uint(64), cs~load_uint(64), cs~load_uint(64), cs~load_uint(32), cs~load_uint(16), cs~load_uint(16));
+
+  cell cf18 = config_param(18);
+  var (_, value, _) = cf18.udict_get_max?(32);
+  cs = value.skip_bits(8);
+  var (utime_since, bit_price_ps, cell_price_ps, mc_bit_price_ps, mc_cell_price_ps)
+    = (cs~load_uint(32), cs~load_uint(64), cs~load_uint(64), cs~load_uint(64), cs~load_uint(64));
+
+  return (
+    lum_price, bit_price, cell_price, ihr_price_factor, first_frac, next_frac,
+    bit_price_ps, cell_price_ps, mc_bit_price_ps, mc_cell_price_ps
+  );
+}
+
+(int, int) get_data_size(cell data) method_id {
+  var (cells, bits, _) = data.compute_data_size((1 << 63) - 1);
+  return (cells, bits);
+}
+
+int fee_storage(int cells, int bits, int sec) method_id {
+  return get_storage_fee(cells, bits, sec, false);
+}

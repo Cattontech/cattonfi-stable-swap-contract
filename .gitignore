@@ -1,0 +1,10 @@
+node_modules
+temp
+build
+dist
+.DS_Store
+*.fift
+*.log
+*.html
+*.tgz
+*.env

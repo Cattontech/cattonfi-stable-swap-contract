@@ -1,0 +1,17 @@
+#pragma version >=0.4.4;
+#include "export/gem_pool.fc";
+#include "export/gem_buffer.fc";
+#include "forward/gem_pool.fc";
+#include "store_gem_buffer.fc";
+
+int fee::gem_pool_stake() {
+  int storage_fee = fee::store_gem_buffer();
+  int compute_gas = 0
+    + gas::gem_pool_stake
+    + gas::gem_buffer_stake;
+  int compute_fee = get_compute_fee(compute_gas, false);
+
+  int fwd_fee = get_forward_fee(fwd::gem_buffer_stake::cells, fwd::gem_buffer_stake::bits, false);
+
+  return storage_fee + compute_fee + fwd_fee;
+}

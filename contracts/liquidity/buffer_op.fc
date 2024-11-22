@@ -1,0 +1,10 @@
+#pragma version >=0.4.4;
+
+;; -----------------------------------------------------------------------
+;; OpCode
+;; -----------------------------------------------------------------------
+const int op::buffer_token = "buffer_token"c;
+const int op::buffer_add_liquidity = "buffer_add_liquidity"c;
+const int op::buffer_add_liquidity_notification = "buffer_add_liquidity_notification"c;
+const int op::buffer_refund_me = "buffer_refund_me"c;
+const int op::buffer_refund_me_notification = "buffer_refund_me_notification"c;

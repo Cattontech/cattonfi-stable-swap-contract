@@ -1,0 +1,107 @@
+#pragma version >=0.4.4;
+#include "../export/gem_buffer.fc";
+
+;; -----------------------------------------------------------------------
+;; Jetton token
+;; -----------------------------------------------------------------------
+;; forward send_token
+;; -----------------------------------------------------------------------
+const int fwd::send_token::cells = 0
+  + 1; ;;ref_body
+const int fwd::send_token::bits = 0
+  + 32 ;;op (body)
+  + 64 ;;query_id (body)
+  + 124 ;;amount (body) (max)
+  + 267 ;;destination (body)
+  + 267 ;;response_destination (body)
+  + 1 ;;custom_payload (body) (null)
+  + 4 ;;forward_ton_amount (body) (0)
+  + 1 + 32; ;;forward_payload (body) (forward_payload as Cell with reason_code)
+
+;; -----------------------------------------------------------------------
+;; forward burn_notification
+;; -----------------------------------------------------------------------
+const int fwd::burn_notification::cells = 0
+  + 1; ;;ref_body
+const int fwd::burn_notification::bits = 0
+  + 32 ;;op (body)
+  + 64 ;;query_id (body)
+  + 124 ;;amount (body) (max)
+  + 267 ;;sender (body)
+  + 267 ;;response_destination (body)
+  + 1; ;;maybe custom_payload (body)
+
+;; -----------------------------------------------------------------------
+;; forward pool_remove_liquidity
+;; -----------------------------------------------------------------------
+const int fwd::pool_remove_liquidity::cells = 0
+  + fwd::burn_notification::cells
+  + 1 ;;ref_custom_payload
+  + 1; ;;ref_c_min_amounts
+const int fwd::pool_remove_liquidity::bits = 0
+  + fwd::burn_notification::bits
+  + 32 ;;op (pool_remove_liquidity) (body)
+  + 267 ;;recipient (body)
+  + 1 + 1023; ;;c_min_amounts (body) (max)
+
+
+;; -----------------------------------------------------------------------
+;; GemBuffer
+;; -----------------------------------------------------------------------
+;; forward gem_buffer_stake
+;; -----------------------------------------------------------------------
+const int fwd::gem_buffer_stake::cells = 0
+  + 1 + 1 ;;ref_init_data
+  + gem_buffer_code::cells
+  + 1; ;;ref_body
+const int fwd::gem_buffer_stake::bits = 0
+  + 267 ;;pool (state_init_data)
+  + 267 ;;owner (state_init_data)
+  + 4 ;;amount (state_init_data)
+  + 256 ;;reward_debt (state_init_data)
+  + 4 ;;pending_reward (state_init_data)
+  + gem_buffer_code::bits ;;(state_init_code)
+
+  + 32 ;;op (body)
+  + 64 ;;query_id (body)
+  + 124 ;;amount (body) (max)
+  + 124 ;;pending_reward (body) (max)
+  + 256 ;;acc_reward_per_share (body)
+  + 267; ;;return_excess (body)
+
+
+;; -----------------------------------------------------------------------
+;; Gem Pool
+;; -----------------------------------------------------------------------
+;; forward gem_pool_earn
+;; -----------------------------------------------------------------------
+const int fwd::gem_pool_earn::cells = 0
+  + 1; ;;ref_body
+const int fwd::gem_pool_earn::bits = 0
+  + 32 ;;op (body)
+  + 64 ;;query_id (body)
+  + 124 ;;amount (body) (max)
+  + 64 ;;uid (body)
+  + 267 ;;owner (body)
+  + 267; ;;return_excess (body)
+
+;; -----------------------------------------------------------------------
+;; forward gem_pool_unstake
+;; -----------------------------------------------------------------------
+const int fwd::gem_pool_unstake::cells = 0
+  + 1 ;;ref_body
+  + 1; ;;ref_unstake_data
+const int fwd::gem_pool_unstake::bits = 0
+  + 32 ;;op (body)
+  + 64 ;;query_id (body)
+  + 267 ;;owner (body)
+  + 267 ;;to (body)
+  + 267 ;;return_excess (body)
+  + 64 ;;uid (body)
+
+  + 124 ;;staked_amount (unstake_data) (max)
+  + 256 ;;reward_debt (unstake_data)
+  + 124 ;;pending_reward (unstake_data) (max)
+  + 124 ;;gem_buffer_balance (unstake_data) (max)
+  + 124 ;;unstake_amount (unstake_data) (max)
+  + 1; ;;take_lp (unstake_data)

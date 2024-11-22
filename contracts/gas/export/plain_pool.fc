@@ -1,0 +1,28 @@
+#pragma version >=0.4.4;
+
+const int gas::pool_init = 13954;
+const int gas::pool_provide_lp = 22113;
+const int gas::pool_provide_lp_ton = 21268;
+const int gas::pool_exchange = 56124;
+const int gas::pool_exchange_ton = 55186;
+const int gas::pool_remove_liquidity = 67098;
+const int gas::pool_remove_liquidity_imbalance = 123873;
+const int gas::pool_remove_liquidity_one_coin = 78815;
+const int gas::pool_claim_fee = 57047;
+const int gas::pool_kill_me = 12277;
+const int gas::pool_unkill_me = 12403;
+const int gas::pool_ramp_a = 14021;
+const int gas::pool_stop_ramp_a = 13568;
+const int gas::pool_commit_new_fee = 13532;
+const int gas::pool_apply_new_fee = 13471;
+const int gas::pool_revert_new_parameters = 13233;
+const int gas::pool_commit_transfer_ownership = 13692;
+const int gas::pool_apply_transfer_ownership = 13867;
+const int gas::pool_revert_transfer_ownership = 13625;
+const int gas::pool_new_content = 13747;
+const int gas::pool_new_fee_recipient = 13881;
+const int gas::pool_add_liquidity = 99878;
+const int gas::pool_refund_me = 55295;
+
+const int plain_pool_code::cells = 112;
+const int plain_pool_code::bits = 45875;

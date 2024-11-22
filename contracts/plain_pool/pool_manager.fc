@@ -1,0 +1,145 @@
+#pragma version >=0.4.4;
+#include "../lib/stdlib.fc";
+#include "../lib/tuple.fc";
+#include "../lib/common.fc";
+#include "../lib/utils.fc";
+#include "pool_op.fc";
+#include "pool_store.fc";
+#include "pool_curve.fc";
+
+{-
+  wallets$_ wallet_idx:(HashmapE 256 uint4)
+    idx_wallet:(HashmapE 4 uint256) = Wallets;
+
+  pool_init query_id:uint64 admin:MsgAddress fee_recipient:MsgAddress wallets:^Wallets
+    jetton_content:^Cell buffer_code:^Cell liquidity_code:^Cell = InternalMsgBody;
+-}
+() pool_init(slice sender, slice body) impure inline {
+  int query_id = body~load_uint(64);
+  slice creater = body~load_msg_addr();
+  slice admin = body~load_msg_addr();
+  slice fee_recipient = body~load_msg_addr();
+  cell wallets = body~load_ref();
+  cell jetton_content = body~load_ref();
+  cell buffer_code = body~load_ref();
+  cell liquidity_code = body~load_ref();
+
+  throw_unless(err::access_denied, equal_slices(sender, pool::admin));
+
+  if pool::is_initialized? {
+    send_excesses(creater, 0, msg::remaining_value + msg::ignore_errors);
+    throw(0); ;; exit without saving data
+  }
+
+  int amp = pool::future_A * A_PRECISION;
+
+  pool::admin = admin;
+  pool::fee_recipient = fee_recipient;
+
+  pool::is_initialized? = true;
+  pool::initial_A = amp;
+  pool::future_A = amp;
+  pool::initial_A_time = now();
+  pool::future_A_time = now();
+
+  pool::wallets = wallets;
+
+  ;; initialize arrays
+  tuple zero_balances = empty_tuple();
+  zero_balances~tuple::set_len(pool::n_coins, 0);
+  pool::balances = zero_balances.tuple::pack_grams();
+  pool::admin_balances = pool::balances;
+
+  pool::jetton_content = jetton_content;
+  pool::buffer_code = buffer_code;
+  pool::liquidity_code = liquidity_code;
+}
+
+() upgrade_data(slice sender, cell update_data) impure {
+  ;; This is just a template, and will only run after upgrade_code.
+  ;; If data is upgraded, remember to reset this code,
+  ;; so that the next upgrade won't change data by mistake.
+
+  ;; slice ds = get_data().begin_parse(); ;; load old data
+  ;; Add code for migrate data here.
+  ;; pool::save_data(); ;; call from the new code to save data
+
+  ;; Do not change the following code.
+  pool::admin = none_address(); ;; reset admin value and reload
+  pool::load_data(); ;; call from the new code
+  throw_unless(err::access_denied, equal_slices(sender, pool::admin));
+
+  send_excesses(sender, 0, msg::remaining_value + msg::ignore_errors);
+  throw(0);
+}
+
+;; receive from `admin`
+() pool_manager(slice sender, int op, slice body) impure {
+  throw_unless(err::access_denied, equal_slices(sender, pool::admin));
+
+  if op == op::pool_kill_me {
+    kill_me();
+  } 
+  elseif op == op::pool_unkill_me {
+    unkill_me();
+  }
+
+  elseif op == op::pool_ramp_a {
+    body~skip_bits(64); ;; query_id
+    int future_A = body~load_uint(32);
+    int future_time = body~load_uint(64);
+    ramp_A(future_A, future_time);
+  }
+  elseif op == op::pool_stop_ramp_a {
+    stop_ramp_A();
+  }
+
+  elseif op == op::pool_commit_new_fee {
+    body~skip_bits(64); ;; query_id
+    int new_fee = body~load_uint(64);
+    int new_admin_fee = body~load_uint(64);
+    commit_new_fee(new_fee, new_admin_fee);
+  }
+  elseif op == op::pool_apply_new_fee {
+    apply_new_fee();
+  }
+  elseif op == op::pool_revert_new_parameters {
+    revert_new_parameters();
+  }
+
+  elseif op == op::pool_commit_transfer_ownership {
+    body~skip_bits(64); ;; query_id
+    slice new_admin = body~load_msg_addr();
+    commit_transfer_ownership(new_admin);
+  }
+  elseif op == op::pool_apply_transfer_ownership {
+    apply_transfer_ownership();
+  }
+  elseif op == op::pool_revert_transfer_ownership {
+    revert_transfer_ownership();
+  }
+
+  elseif op == op::pool_new_content {
+    body~skip_bits(64); ;; query_id
+    cell new_content = body~load_ref();
+    pool::jetton_content = new_content;
+  }
+  elseif op == op::pool_new_fee_recipient {
+    body~skip_bits(64); ;; query_id
+    slice new_fee_recipient = body~load_msg_addr();
+    pool::fee_recipient = new_fee_recipient;
+  }
+  elseif op == op::upgrade {
+    body~skip_bits(64); ;; query_id
+    cell new_code = body~load_ref();
+    cell update_data = body~load_maybe_ref();
+    set_code(new_code);
+    set_c3(new_code.begin_parse().bless());
+    upgrade_data(sender, update_data);
+  }
+
+  else {
+    throw(err::invalid_op);
+  }
+  send_excesses(sender, 0, msg::remaining_value + msg::ignore_errors);
+}

@@ -1,0 +1,26 @@
+#pragma version >=0.4.4;
+
+;; -----------------------------------------------------------------------
+;; OpCode
+;; -----------------------------------------------------------------------
+const int op::pool_init = "pool_init"c;
+const int op::pool_provide_lp = "pool_provide_lp"c;
+const int op::pool_provide_lp_ton = "pool_provide_lp_ton"c;
+const int op::pool_exchange = "pool_exchange"c;
+const int op::pool_exchange_ton = "pool_exchange_ton"c;
+const int op::pool_remove_liquidity = "pool_remove_liquidity"c;
+const int op::pool_remove_liquidity_imbalance = "pool_remove_liquidity_imbalance"c;
+const int op::pool_remove_liquidity_one_coin = "pool_remove_liquidity_one_coin"c;
+const int op::pool_claim_fee = "pool_claim_fee"c;
+const int op::pool_kill_me = "pool_kill_me"c;
+const int op::pool_unkill_me = "pool_unkill_me"c;
+const int op::pool_ramp_a = "pool_ramp_a"c;
+const int op::pool_stop_ramp_a = "pool_stop_ramp_a"c;
+const int op::pool_commit_new_fee = "pool_commit_new_fee"c;
+const int op::pool_apply_new_fee = "pool_apply_new_fee"c;
+const int op::pool_revert_new_parameters = "pool_revert_new_parameters"c;
+const int op::pool_commit_transfer_ownership = "pool_commit_transfer_ownership"c;
+const int op::pool_apply_transfer_ownership = "pool_apply_transfer_ownership"c;
+const int op::pool_revert_transfer_ownership = "pool_revert_transfer_ownership"c;
+const int op::pool_new_content = "pool_new_content"c;
+const int op::pool_new_fee_recipient = "pool_new_fee_recipient"c;

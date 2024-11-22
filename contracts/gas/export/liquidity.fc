@@ -1,0 +1,8 @@
+#pragma version >=0.4.4;
+
+const int gas::burn = 7791;
+const int gas::transfer = 10568;
+const int gas::internal_transfer = 12714;
+
+const int liquidity_code::cells = 24;
+const int liquidity_code::bits = 6633;

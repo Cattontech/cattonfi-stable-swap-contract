@@ -1,0 +1,9 @@
+#pragma version >=0.4.4;
+
+const int gas::gem_pool_stake = 14341;
+const int gas::gem_pool_unstake = 21313;
+const int gas::gem_pool_earn = 5845;
+const int gas::gem_pool_change_reward = 9127;
+
+const int gem_pool_code::cells = 37;
+const int gem_pool_code::bits = 11649;

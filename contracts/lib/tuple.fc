@@ -1,0 +1,77 @@
+#pragma version >=0.4.4;
+#include "stdlib.fc";
+
+{-
+  The data type tuple can hold up to 255 values.
+  Each modification action will return a new tuple.
+-}
+
+;;; Check if tuple.
+forall X -> int is_tuple(X t) asm "ISTUPLE";
+;;; Get last value of tuple.
+forall X -> (tuple, X) ~tpop(tuple t) asm "TPOP";
+
+;;; Get size of tuple.
+int tlen(tuple t) asm "TLEN";
+int tlenq(tuple t) asm "QTLEN";
+
+;;; Tuple set value `x` at index `k`. Throw 5 if index out of range .
+forall X -> tuple tset(tuple t, int k, X x) asm(t x k) "SETINDEXVAR";
+forall X -> (tuple, ()) ~tset(tuple t, int k, X x) asm(t x k) "SETINDEXVAR";
+forall X -> tuple tsetq(tuple t, int k, X x) asm(t x k) "SETINDEXVARQ";
+forall X -> (tuple, ()) ~tsetq(tuple t, int k, X x) asm(t x k) "SETINDEXVARQ";
+
+;;; Reverse tuple
+tuple tuple::reverse(tuple src) {
+  tuple dest = empty_tuple();
+  repeat(src.tlen()) {
+    dest~tpush(src~tpop());
+  }
+  return dest;
+}
+
+;;; Expanding tuple `t` if t.tlen() < l.
+forall X -> (tuple, ()) tuple::set_len(tuple t, int l, X fill_val) {
+  int fill_len = t.tlen() >= l ? 0 : l - t.tlen();
+  repeat(fill_len) {
+    t~tpush(fill_val);
+  }
+  return (t, ());
+}
+
+;;; Tuple set value `x` at index `k` with auto expanding tuples.
+forall X -> (tuple, ()) tuple::set(tuple t, int k, X val, X fill_val) {
+  int fill_len = t.tlen() > k ? 0 : k + 1 - t.tlen();
+  repeat(fill_len) {
+    t~tpush(fill_val);
+  }
+  t~tset(k, val);
+  return (t, ());
+}
+
+;;; Return value of tuple `t` at index `k` if 0 <= k < t.tlen. Otherwise return `fill_val`
+forall X -> X tuple::at(tuple t, int k, X fill_val) {
+  return t.tlen() > k ? t.at(k) : fill_val;
+}
+
+;;; Unpack gram array from slice. One slice contains up to 8 grams
+tuple tuple::unpack_grams(cell c_grams) {
+  tuple t_grams = empty_tuple();
+  if ~ c_grams.cell_null?() {
+    slice ds = c_grams.begin_parse();
+    while(~ ds.slice_empty?()) {
+      t_grams~tpush(ds~load_coins());
+    }
+  }
+  return t_grams;
+}
+
+;;; Pack gram array to slice. One slice contains up to 8 grams
+cell tuple::pack_grams(tuple t_grams) {
+  builder c_grams = begin_cell();
+  t_grams = t_grams.tuple::reverse();
+  repeat(t_grams.tlen()) {
+    c_grams = c_grams.store_coins(t_grams~tpop());
+  }
+  return c_grams.end_cell();
+}

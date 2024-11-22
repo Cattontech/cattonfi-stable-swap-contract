@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["wrappers/*", "wrappers/jetton/*"],
+  "exclude": ["**/*spec.ts", "wrappers/**/*compile.ts"]
+}
